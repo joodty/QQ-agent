@@ -33,6 +33,7 @@ import { safeFetchBinary, browseLockState } from './safe-fetch.js';
 import { getGlobalBlocklist, updateGlobalBlocklist, FIXED_PRICE_FEED_URL } from './community.js';
 import { listAccounts, removeAccount, loginAccount, publishModule, verifyInstallCodes, installByCode } from './market.js';
 import { detectDialect as detectThinkingDialect } from './thinking.js';
+import { switchConversationArchive } from './archive-runtime.js';
 
 /**
  * 构建路由表。
@@ -84,6 +85,31 @@ export function createRoutes(deps) {
   };
 
   return [
+    {
+      method: 'GET', pattern: '/api/conversation-archives',
+      handler: async ({ url, res, json }) => {
+        const chatKey = url.searchParams.get('chatKey');
+        try {
+          return json(res, 200, { enabled: Boolean(store.archives),
+            chats: store.archives?.listChats() ?? [],
+            archives: store.archives?.list(chatKey || undefined) ?? [],
+            selected: chatKey ? store.archiveSelection(chatKey) : null,
+            messages: chatKey ? (store.archives?.readChat(chatKey)?.messages ?? []).slice(-100) : [] });
+        } catch (error) { return json(res, error.statusCode ?? 400, { error: error.message }); }
+      }
+    },
+    {
+      method: 'POST', pattern: '/api/conversation-archives/select',
+      handler: async ({ req, res, json }) => {
+        try {
+          const body = await readBody(req);
+          if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) return json(res, 400, { error: '请刷新档案列表后重试' });
+          const selected = switchConversationArchive({ store, orchestrator, chatKey: body.chatKey, archiveId: body.archiveId, expectedVersion: body.expectedVersion });
+          emit('chat-update', body.chatKey);
+          return json(res, 200, { ok: true, selected });
+        } catch (error) { return json(res, error.statusCode ?? error.status ?? 400, { error: error.message }); }
+      }
+    },
     // ── 状态 / 数据目录 / 重置 ─────────────────────────────────────────
     {
       method: 'GET', pattern: '/api/status',

@@ -19,6 +19,7 @@ import { currentProviders } from './providers.js';
 import { skillManager } from './skills/manager.js';
 import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
+import { archiveHistorySection } from './archive-runtime.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
@@ -50,6 +51,8 @@ export class Orchestrator {
     this.activeRuns = new Map();       // chatKey -> sessionId
     this.sessionAbortMarks = new Set(); // 用户请求中止的 sessionId（abortSession 打标记，#runAgent 每轮检查）
     this.sessionAbortControllers = new Map(); // sessionId -> AbortController（中止时中断在途 LLM 请求）
+    this.archiveMemoryControllers = new Map(); // chatKey -> Set<AbortController>
+    this.archiveWork = new Set();
     this.runSeq = new Map();           // chatKey -> 第几次处理（跨重启清零即可）
     // ── 活跃模式（chatActive）──
     // chatKey -> { topic, until }：活跃期状态（话题锚点 + 到期时间）。
@@ -126,6 +129,8 @@ export class Orchestrator {
     if (s.status !== 'error') return { ok: false, reason: '只有失败的会话才能重试' };
     if (Array.isArray(s.sent) && s.sent.length > 0) return { ok: false, reason: '该会话已发出过消息，重试会导致重复发言' };
     if (this.runningChats.has(s.chatKey)) return { ok: false, reason: '该会话正在运行中' };
+    try { this.store.assertArchiveCurrent?.(s.chatKey, s.archiveSelection ?? null); }
+    catch (error) { return { ok: false, reason: String(error?.message ?? error) }; }
     // 把触发批重新标记为未读（消息本体一直在存档里，只是当初被 drain 置了已读）。
     // triggerText 里的文本可能因改名/截断对不上，按会话起止时间窗恢复更稳。
     const restored = this.store.markUnreadInWindow(s.chatKey, s.startedAt, s.endedAt || s.startedAt);
@@ -218,6 +223,8 @@ export class Orchestrator {
    * 但它们是"已确定要跑"的调用，直接排定时器即可。
    */
   scheduleWake(chatKey, delay = null, { reuseSessionId = null, verified = false } = {}) {
+    const archiveSelection = this.store.captureArchive?.(chatKey) ?? null;
+    this.store.assertArchiveCurrent?.(chatKey, archiveSelection);
     const ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
     // 不可重置：已在倒计时中就不动它（唯一例外是原地重试——它进来时
     // pendingWake 一定没有该 chatKey，因为 runningChats 刚释放、旧定时器已到期）。
@@ -259,6 +266,8 @@ export class Orchestrator {
           status: 'waiting',
           waitUntil
         });
+        session.archiveSelection = archiveSelection;
+        this.sessions.update(session.id);
         this.pendingSessions.set(chatKey, session.id);
         this.emit('session-start', { sessionId: session.id, chatKey, status: 'waiting', triggerSummary: summary });
       }
@@ -266,6 +275,8 @@ export class Orchestrator {
     }
 
     const timer = setTimeout(() => {
+      try { this.store.assertArchiveCurrent?.(chatKey, archiveSelection); }
+      catch { this.archiveChanged(chatKey); return; }
       this.pendingWake.delete(chatKey);
       const waitingId = this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
@@ -345,7 +356,31 @@ export class Orchestrator {
 
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
-  async wake(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
+  wake(chatKey, options = {}) {
+    return this.#trackArchiveWork(this.wakeCaptured(chatKey, options));
+  }
+
+  #trackArchiveWork(work) {
+    const pending = Promise.resolve(work);
+    this.archiveWork.add(pending);
+    pending.finally(() => this.archiveWork.delete(pending)).catch(() => {});
+    return pending;
+  }
+
+  async whenArchiveIdle() {
+    while (this.archiveWork.size) await Promise.allSettled([...this.archiveWork]);
+  }
+
+  async wakeCaptured(chatKey, options = {}) {
+    try {
+      return await (this.store.withArchive ? this.store.withArchive(chatKey, () => this.wakeInArchive(chatKey, options)) : this.wakeInArchive(chatKey, options));
+    } catch (error) {
+      if (error?.code !== 'ARCHIVE_CHANGED') throw error;
+      if (options.waitingSessionId) this.#finishWaiting(options.waitingSessionId, 'aborted', error.message);
+    }
+  }
+
+  async wakeInArchive(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
@@ -362,6 +397,7 @@ export class Orchestrator {
     // 已读（不丢消息，解除后还能作为历史上下文），直接返回，不创建会话。
     if (String(chatKey).startsWith('group:')) {
       const muted = await this.#checkSelfMuted(chatKey);
+      this.store.assertArchiveCurrent?.(chatKey);
       if (muted) {
         const marked = this.store.markAllRead(chatKey);
         if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '机器人被禁言');
@@ -369,6 +405,8 @@ export class Orchestrator {
         return;
       }
     }
+
+    this.store.assertArchiveCurrent?.(chatKey);
 
     // 全局并发限制：满了就稍后重试
     if (this.runningChats.size >= Math.max(1, Number(getConfig().maxConcurrentRuns) || 2)) {
@@ -389,6 +427,7 @@ export class Orchestrator {
       // 停止后又拉起一次唤醒）。与 wakeTimers 同一张表管理，abortAll 时一并清掉。
       const retryTimer = setTimeout(() => {
         this.wakeTimers.delete(chatKey);
+        try { this.store.assertArchiveCurrent?.(chatKey); } catch { return; }
         if (!this.runningChats.has(chatKey) && !this.paused && !this.aborted) {
           this.scheduleWake(chatKey, 0);
         }
@@ -572,6 +611,8 @@ export class Orchestrator {
       this.emit('session-start', { sessionId: session.id, chatKey, triggerSummary });
     }
     this.activeRuns.set(chatKey, session.id);
+    session.archiveSelection = this.store.captureArchive?.(chatKey) ?? null;
+    this.sessions.update(session.id);
     this.emit('chat-update', chatKey);
 
     // ── 会话级重试 ──
@@ -587,6 +628,7 @@ export class Orchestrator {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
+          this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
           await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: effectiveTier.count, tierInfo: effectiveTier, activeTopic: activeState ? activeState.topic : null });
           lastError = null;
           break;
@@ -596,6 +638,8 @@ export class Orchestrator {
           const canRetry = attempt < MAX_SESSION_ATTEMPTS
             && isRetryableError(error)
             && sentCount === 0
+            && error?.code !== 'ARCHIVE_CHANGED'
+            && !this.sessionAbortMarks.has(session.id)
             && !this.aborted;
           if (!canRetry) break;
 
@@ -614,7 +658,7 @@ export class Orchestrator {
         // 用户手动中止（「中止」按钮）打断在途请求时，错误从 #runAgent 一路上抛
         // 到这里 —— 不能记成 error：那会让 UI 亮出"重试"按钮（中止不该重试），
         // 也会让会话账面状态与实际发生的事对不上。按 aborted 收尾（2026-09-19 修）。
-        if (this.sessionAbortMarks.has(session.id)) {
+        if (this.sessionAbortMarks.has(session.id) || lastError?.code === 'ARCHIVE_CHANGED') {
           this.sessionAbortMarks.delete(session.id);
           this.sessionAbortControllers.delete(session.id);
           session.error = null;
@@ -629,10 +673,18 @@ export class Orchestrator {
         }
       }
     } finally {
-      this.activeRuns.delete(chatKey);
-      this.runningChats.delete(chatKey);
+      this.sessionAbortControllers.delete(session.id);
+      if (this.activeRuns.get(chatKey) === session.id) {
+        this.activeRuns.delete(chatKey);
+        this.runningChats.delete(chatKey);
+      }
       this.emit('chat-update', chatKey);
     }
+
+    // An old run must not drain the newly selected archive or revive old unread
+    // history after an A→B→A switch.
+    try { this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection); }
+    catch { return; }
 
     // drain：运行期间来的新消息 → 再次新开会话处理（这是"确保看到所有发言"的关键）
     if (!this.aborted && !this.paused) {
@@ -730,6 +782,7 @@ export class Orchestrator {
   }
 
   async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, activeTopic = null }) {
+    this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
     const cfg = getConfig();
     // 开一轮新运行：清空回复安全网的候选草稿池（草稿只在"这一次运行"内有意义，
     // 跨运行留着会把上一次的句子当成这次可以发的原句）。
@@ -838,7 +891,7 @@ export class Orchestrator {
       // 提示词锚点：传入上一轮的前缀状态；新状态经 session.promptAnchorState 带回
       promptAnchor: { prev: this.promptAnchors.get(chatKey) || null },
       session
-    });
+    }) + archiveHistorySection(this.store, chatKey);
 
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
@@ -995,6 +1048,7 @@ export class Orchestrator {
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）。
       // abortSignal：会话级中止时在途请求立即断开 —— isRetryableError 把
       // "中止"判为不可重试，chatCompletionWithRetry 不再打下一发，直接上抛。
+      this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
       const response = await chatCompletionWithRetry({ messages, tools: openAiTools, skillContext, signal: abortSignal });
       session.model = response.model || session.model;
       // 渠道与模型必须同源：fallback 可以配另一个 provider，只更新 model 会把
@@ -1004,6 +1058,7 @@ export class Orchestrator {
       }
       addUsage(session.usage, response.usage);
       session.usage.calls += 1;
+      this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
       // Skill 附加统计（如 reasoning tokens）——单独累加，不混进成本口径
       if (response.extraUsage) {
         session.usage.extra = { ...(session.usage.extra || {}) };
@@ -1017,6 +1072,7 @@ export class Orchestrator {
       } catch (error) {
         skillManager.recordError('after-response', error);
       }
+      this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
 
       const msg = response.message;
       const finalContent = typeof msg.content === 'string' ? msg.content : (msg.content ?? null);
@@ -1126,6 +1182,7 @@ export class Orchestrator {
       // 记下这批工具的起点：下面要用"本批新增了哪些发送记录"判断本地模型能不能收尾
       const sentBeforeBatch = session.sent.length;
       for (const call of toolCalls) {
+        this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
         const name = call?.function?.name ?? '';
         const argsRaw = call?.function?.arguments ?? '{}';
         if (name === 'web_search' || name === 'web_fetch') webSearchCount += 1;
@@ -1144,9 +1201,11 @@ export class Orchestrator {
         } catch (error) {
           skillManager.recordError('before-tool', error);
         }
+        this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
         const result = blocked
           ? { content: `错误：${blocked.reason || '该工具调用被 Skill 拒绝'}`, isError: true }
           : await executeTool(toolDefs, ctx, name, argsRaw);
+        this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
         try {
           await skillManager.runHook('after-tool', {
             ...skillContext, toolName: name, argsRaw, result, session
@@ -1500,7 +1559,14 @@ export class Orchestrator {
    *   3) 仍匹配不到但有名字 → 允许整理（历史遗留的"按名字存"条目不能永远排队）；
    *   4) 既无名也无号 → 跳过。
    */
-  async consolidateMemoryForChat(chatKey, { userIds = null, force = false } = {}) {
+  consolidateMemoryForChat(chatKey, options = {}) {
+    const work = () => this.consolidateMemoryInArchive(chatKey, options);
+    try {
+      return this.#trackArchiveWork(this.store.withArchive ? this.store.withArchive(chatKey, work) : work());
+    } catch (error) { return Promise.reject(error); }
+  }
+
+  async consolidateMemoryInArchive(chatKey, { userIds = null, force = false } = {}) {
     const cfg = getConfig();
     if (!cfg.api?.model || !cfg.api?.baseUrl) throw new Error('模型未配置，无法整理记忆');
     const notes = cfg.memberNotes || {};
@@ -1615,6 +1681,8 @@ export class Orchestrator {
           isNew: !!mem.isNew
         });
       } catch (error) {
+        this.store.assertArchiveCurrent?.(chatKey);
+        if (error?.code === 'ARCHIVE_CHANGED') throw error;
         failed.push({ userId: mem.userId, name: mem.name, reason: String(error?.message ?? error) });
       }
     }
@@ -1732,7 +1800,7 @@ export class Orchestrator {
       ? this.#buildNewImpressionPrompt(chatKey, mem, stats)
       : this.#buildConsolidatePrompt(mem);
 
-    const res = await this.#memoryChat([
+    const res = await this.#memoryChat(chatKey, [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ]);
@@ -1814,21 +1882,38 @@ export class Orchestrator {
    * useChatModel=true 时跟随聊天模型（cfg.api.*）；
    * false 时使用 cfg.memory.provider/model 指向的目录模型（端点/密钥取自 providers）。
    */
-  async #memoryChat(messages) {
-    const cfg = getConfig();
-    const mem = cfg.memory || {};
-    if (mem.useChatModel !== false) {
-      return chatCompletion({ messages, temperature: 0.2 });
-    }    const providers = currentProviders();
-    const p = providers.find((x) => x.id === mem.provider);
-    if (!p?.baseURL || !p?.apiKey || !mem.model) {
-      throw new Error('记忆整理专用模型未配置：请在设置 → 记忆里选择提供商与模型');
+  async #memoryChat(chatKey, messages) {
+    const selection = this.store.captureArchive?.(chatKey) ?? null;
+    this.store.assertArchiveCurrent?.(chatKey, selection);
+    const controller = new AbortController();
+    if (!this.archiveMemoryControllers.has(chatKey)) this.archiveMemoryControllers.set(chatKey, new Set());
+    const controllers = this.archiveMemoryControllers.get(chatKey);
+    controllers.add(controller);
+    try {
+      const cfg = getConfig();
+      const mem = cfg.memory || {};
+      if (mem.useChatModel !== false) {
+        const result = await chatCompletion({ messages, temperature: 0.2, signal: controller.signal });
+        this.store.assertArchiveCurrent?.(chatKey, selection);
+        return result;
+      }
+      const providers = currentProviders();
+      const p = providers.find((x) => x.id === mem.provider);
+      if (!p?.baseURL || !p?.apiKey || !mem.model) {
+        throw new Error('记忆整理专用模型未配置：请在设置 → 记忆里选择提供商与模型');
+      }
+      const result = await chatCompletion({
+        messages,
+        temperature: 0.2,
+        signal: controller.signal,
+        overrides: { baseUrl: p.baseURL, apiKey: p.apiKey, model: mem.model, timeoutMs: 180000 }
+      });
+      this.store.assertArchiveCurrent?.(chatKey, selection);
+      return result;
+    } finally {
+      controllers.delete(controller);
+      if (!controllers.size) this.archiveMemoryControllers.delete(chatKey);
     }
-    return chatCompletion({
-      messages,
-      temperature: 0.2,
-      overrides: { baseUrl: p.baseURL, apiKey: p.apiKey, model: mem.model, timeoutMs: 180000 }
-    });
   }
 
   stopProactiveLoop() {
@@ -1837,6 +1922,26 @@ export class Orchestrator {
   }
 
   // ── 控制接口 ───────────────────────────────────────────────────────────
+
+  archiveChanged(chatKey) {
+    const timer = this.wakeTimers.get(chatKey);
+    if (timer) clearTimeout(timer);
+    this.wakeTimers.delete(chatKey);
+    this.#cancelUnreadFallback(chatKey);
+    this.pendingWake.delete(chatKey);
+    this.verifiedWakes.delete(chatKey);
+    const waiting = this.pendingSessions.get(chatKey);
+    this.pendingSessions.delete(chatKey);
+    if (waiting) this.#discardWaiting(waiting);
+    const active = this.activeRuns.get(chatKey);
+    if (active) this.abortSession(active);
+    for (const controller of this.archiveMemoryControllers.get(chatKey) ?? []) {
+      controller.abort(Object.assign(new Error('人设档案已切换，记忆整理已中止'), { code: 'ARCHIVE_CHANGED' }));
+    }
+    this.promptAnchors.delete(chatKey);
+    this.activeTopics.delete(chatKey);
+    this.emit('chat-update', chatKey);
+  }
 
   setPaused(paused, reason = 'manual') {
     this.paused = !!paused;
@@ -1897,6 +2002,10 @@ export class Orchestrator {
 
   async abortAll() {
     this.aborted = true;
+    for (const sessionId of this.activeRuns.values()) this.abortSession(sessionId);
+    for (const controllers of this.archiveMemoryControllers.values()) {
+      for (const controller of controllers) controller.abort(new Error('记忆整理已中止'));
+    }
     for (const timer of this.wakeTimers.values()) clearTimeout(timer);
     this.wakeTimers.clear();
     for (const timer of this.unreadFallbackTimers.values()) clearTimeout(timer);

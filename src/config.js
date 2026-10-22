@@ -644,10 +644,17 @@ export function setRuntimeConfig(cfg) {
  *    且统一模式下 UI 隐藏了分会话编辑入口，用户无从发现也无处改）。
  *    开关关掉后条目恢复生效 —— 数据不删，只是不再参与合并。
  */
+let archivePersonaResolver = null;
+export function setArchivePersonaResolver(resolver) {
+  archivePersonaResolver = resolver;
+}
+
 export function personaForChat(chatKey) {
   const base = getConfig().persona || {};
   const [kind, id] = String(chatKey || '').split(':');
-  if (!id) return base;
+  if (!id || !['group', 'private'].includes(kind)) return base;
+  const archived = archivePersonaResolver?.(chatKey);
+  if (archived) return { ...base, ...archived };
   // 统一人设模式：一律用全局，不看 personaByChat
   if (getConfig().personaUnified !== false) return base;
   const perChat = getConfig().personaByChat || {};

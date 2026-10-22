@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人设档案 · QQ Agent</title><link rel="stylesheet" href="archives.css"><script type="module" src="archives.js"></script></head>
+<body><main><a href="/">← 返回控制台</a><h1>人设档案</h1>
+<p>每个聊天可以保存多个人设档案。切回原档案，会继续使用它的人设、历史和后续记忆。</p>
+<p id="status" role="status">正在读取档案…</p>
+<p>启用导入档案的聊天，以档案内的人设为准。普通设置页的全局人设不会覆盖它；本页目前支持查看和切换，档案人设编辑另行提供。</p>
+<label for="chat">聊天对象</label><select id="chat" disabled><option value="">请选择聊天对象</option></select>
+<section id="list" aria-label="可用档案"></section>
+<details><summary>查看当前档案的人设</summary><pre id="persona"></pre></details>
+<section><h2>当前档案的最近消息</h2><p>导入的消息均视为已读，不会自动重放或触发付费回复。完整导入记录保存在本机档案数据库中。</p><ol id="messages"></ol></section>
+<details><summary>如何导入旧数据</summary><p>由运行机器的维护者使用仓库中的导出与导入命令完成。先预览并核对缺失项，再正式导入；首次导入后重启新服务。操作说明见 <a href="https://github.com/joodty/QQ-agent/blob/codex/group-management/doc/platform/LEGACY_IMPORT.md" target="_blank" rel="noreferrer">迁移指南</a>。</p><p>档案选择是当前本机控制台的管理功能，多用户授权后台仍在开发中。</p></details>
+</main></body></html>

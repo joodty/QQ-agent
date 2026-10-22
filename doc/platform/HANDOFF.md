@@ -20,7 +20,7 @@
 | 多账号、QQ 群管理身份验证 | 待适配；原上游控制台不能据此视为已具备公网多人后台 |
 | 按群/私聊选择用户 Key | 待统一凭据解析；不能再为用户 Key 写功能不同的聊天分支 |
 | 预算对真实调用生效 | 待所有付费入口、报价、重试及后台子任务接入验证 |
-| 人设版本与旧历史迁移 | 待脱敏样本映射；上游分会话人设保留，不重复实现基础覆盖 |
+| 人设版本与旧历史迁移 | 已有只读导出、预览/事务导入和档案续聊；见 [导入指南](LEGACY_IMPORT.md)。生产数据尚未导入，普通账号授权后台仍待适配 |
 | 生产切换 | 未执行；旧服务、数据库、QQ 与代理继续由原部署管理 |
 
 ## 关键代码
@@ -32,6 +32,8 @@
 | `src/config.js` | 上游配置与群/私聊人设覆盖；当前不是多人权限和凭据隔离层 |
 | `src/conversation-context.js` | 不含密钥的执行范围、引用版本与并发隔离 |
 | `src/conversation-budget.js` | 群/私聊通用预算状态、在途金额与结算协议 |
+| `src/conversation-archives.js`、`src/legacy-archive-export.js` | 旧人设/档案/历史导入与来源追溯；不复制凭据或 QQ 登录态 |
+| `src/archive-runtime.js`、`ui/archives.html` | 按档案续聊、记忆范围和切换入口 |
 | `test/conversation-*-test.mjs` | 新基础模块的独立边界测试 |
 | `test/_harness.mjs` | 原有模拟 QQ/模型及隔离数据脚手架 |
 | `scripts/local/Setup-Dev.ps1` | 准备本地 Node 与开发依赖，不运行 QQ 安装流程 |

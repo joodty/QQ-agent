@@ -45,7 +45,7 @@ node --version
 npm run test:platform
 ```
 
-上游兼容底线为 Node 20，本扩展的可重复开发与验证使用 Node 24。macOS/Linux 或已有 Node 24 的机器可直接执行：
+本 fork 的开发与服务端档案功能要求 Node 24；上游原来的 Node 20 底线不包含新增 SQLite 档案功能。macOS/Linux 或已有 Node 24 的机器可直接执行：
 
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund

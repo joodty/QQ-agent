@@ -6,11 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
+import { createRequire } from 'node:module';
+import { getConfig, updateConfig, ROOT, DATA_DIR, setArchivePersonaResolver } from './config.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { isAtMe } from './prompt.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
+import { scopeArchiveMemory } from './archive-runtime.js';
 import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
@@ -627,8 +629,16 @@ export function createApp({ log = console.log } = {}) {
 
   // ── 组件 ──
   const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
-  const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
-  const memory = new MemoryStore();
+  const archiveFile = path.join(DATA_DIR, 'conversation-archives.sqlite');
+  let archives = null;
+  if (fs.existsSync(archiveFile)) {
+    if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('已导入的 SQLite 人设档案需要 Node 24，请使用本地开发脚本准备运行环境');
+    const { ConversationArchives } = createRequire(import.meta.url)('./conversation-archives.js');
+    archives = new ConversationArchives({ file: archiveFile });
+  }
+  const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0, { archives });   // 0 = 不限
+  setArchivePersonaResolver(archives ? chatKey => store.archivePersona(chatKey) : null);
+  const memory = archives ? scopeArchiveMemory(new MemoryStore(), store) : new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
   const onebot = new OneBotClient({
     wsUrl: cfg.snowluma?.wsUrl,
@@ -1639,6 +1649,9 @@ export function createApp({ log = console.log } = {}) {
     pluginWatcher = null;
     await orchestrator.abortAll();
     orchestrator.stopReminderLoop();
+    await orchestrator.whenArchiveIdle?.();
+    await sender.whenIdle?.();
+    archives?.close();
     if (communitySyncTimer) clearInterval(communitySyncTimer);
     if (obPortPollTimer) clearInterval(obPortPollTimer);
     // 索引缓存立刻落盘：正常运行中靠防抖（5s），退出前必须写一次，

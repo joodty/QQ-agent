@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 
@@ -44,9 +45,43 @@ function saveChat(state) {
 }
 
 export class ChatStore {
-  constructor(maxPerChat = 0) {
+  constructor(maxPerChat = 0, { archives = null } = {}) {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
     this.chats = new Map(); // chatKey -> state
+    this.archives = archives;
+    this.archiveContext = new AsyncLocalStorage();
+  }
+
+  archiveSelection(chatKey) { return this.archives?.active(chatKey) ?? null; }
+
+  captureArchive(chatKey) {
+    const pinned = this.archiveContext.getStore();
+    return pinned?.chatKey === chatKey ? pinned.selection : this.archiveSelection(chatKey);
+  }
+
+  assertArchiveCurrent(chatKey, token = this.captureArchive(chatKey)) {
+    const current = this.archiveSelection(chatKey);
+    if ((current?.archiveId ?? null) !== (token?.archiveId ?? null)
+        || (current?.selectionVersion ?? 0) !== (token?.selectionVersion ?? 0)) {
+      throw Object.assign(new Error('人设档案已切换，请在当前档案重新发起操作'), { code: 'ARCHIVE_CHANGED', statusCode: 409 });
+    }
+    return current;
+  }
+
+  withArchive(chatKey, work) {
+    const pinned = this.archiveContext.getStore();
+    if (pinned?.chatKey === chatKey) { this.assertArchiveCurrent(chatKey); return work(); }
+    return this.archiveContext.run({ chatKey, selection: this.archiveSelection(chatKey) }, work);
+  }
+
+  archivePersona(chatKey) {
+    const selected = this.assertArchiveCurrent(chatKey);
+    return selected ? { roleText: selected.persona.content, customRules: '', systemPromptOverride: '' } : null;
+  }
+
+  #save(st) {
+    if (st.archiveId) this.archives.writeChat(st);
+    else saveChat(st);
   }
 
   setMaxPerChat(cap) {
@@ -54,6 +89,8 @@ export class ChatStore {
   }
 
   #state(chatKey) {
+    const selected = this.assertArchiveCurrent(chatKey);
+    if (selected) return this.archives.readChat(chatKey, selected.archiveId);
     if (!this.chats.has(chatKey)) this.chats.set(chatKey, loadChat(chatKey));
     return this.chats.get(chatKey);
   }
@@ -67,7 +104,7 @@ export class ChatStore {
         if (m) this.#state(`${m[1]}:${m[2]}`);
       }
     } catch { /* 目录不存在 */ }
-    return [...this.chats.keys()];
+    return [...new Set([...this.chats.keys(), ...(this.archives?.listChats() ?? [])])];
   }
 
   getChatMeta(chatKey) {
@@ -105,7 +142,7 @@ export class ChatStore {
     };
     st.messages.push(entry);
     this.#trim(st);
-    saveChat(st);
+    this.#save(st);
     return entry;
   }
 
@@ -126,7 +163,22 @@ export class ChatStore {
     };
     st.messages.push(entry);
     this.#trim(st);
-    saveChat(st);
+    this.#save(st);
+    return entry;
+  }
+
+  // A send accepted by QQ belongs to the archive captured before dispatch,
+  // even when the operator switches while that network request is in flight.
+  appendSelfForArchive(chatKey, { text, ts, mid = null }, token) {
+    const st = token?.archiveId ? this.archives.readChat(chatKey, token.archiveId)
+      : (this.chats.get(chatKey) ?? loadChat(chatKey));
+    if (!st) throw new Error('原发送档案不存在，已停止写入其他档案');
+    const entry = { id: st.nextLocalId++, mid, ts: ts || Date.now(), senderId: 'self', senderName: '我',
+      text: String(text ?? ''), self: true, read: true, reply: null, media: [] };
+    st.messages.push(entry);
+    this.#trim(st);
+    if (token?.archiveId) this.archives.writeChat(st);
+    else { this.chats.set(chatKey, st); saveChat(st); }
     return entry;
   }
 
@@ -135,7 +187,7 @@ export class ChatStore {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read && !m.self);
     for (const m of st.messages) m.read = true;
-    saveChat(st);
+    this.#save(st);
     return unread;
   }
 
@@ -163,7 +215,7 @@ export class ChatStore {
       else { m.read = true; archived++; }   // 触发点之前的旧积压：沉入历史
     }
     for (const m of st.messages) m.read = true;   // batch 里的也置已读（作为触发批取走）
-    saveChat(st);
+    this.#save(st);
     return { batch, archived };
   }
 
@@ -183,7 +235,7 @@ export class ChatStore {
     for (const m of st.messages) {
       if (!m.read && !m.self) { m.read = true; n++; }
     }
-    if (n) saveChat(st);
+    if (n) this.#save(st);
     return n;
   }
 
@@ -203,7 +255,7 @@ export class ChatStore {
     const m = st.messages.find((x) => x.id === id);
     if (!m || m.read || m.self) return false;
     m.read = true;
-    saveChat(st);
+    this.#save(st);
     return true;
   }
 
@@ -224,7 +276,7 @@ export class ChatStore {
       if (m.self) continue;
       if (m.read && m.ts >= winStart && m.ts <= winEnd) { m.read = false; n++; }
     }
-    if (n) saveChat(st);
+    if (n) this.#save(st);
     return n;
   }
 
@@ -265,7 +317,7 @@ export class ChatStore {
     if (!m) return false;
     m.recalled = true;
     m.read = true;   // 撤回的消息也算"已读"，不再触发回复
-    saveChat(st);
+    this.#save(st);
     return true;
   }
 
@@ -287,7 +339,7 @@ export class ChatStore {
         if (x && x.url && !seen.has(x.url)) { m.media.push(x); seen.add(x.url); }
       }
     }
-    saveChat(st);
+    this.#save(st);
     return true;
   }
 
@@ -308,7 +360,7 @@ export class ChatStore {
     const before = st.messages.length;
     st.messages = st.messages.filter((m) => !ids.has(m.id));
     const removed = before - st.messages.length;
-    if (removed) saveChat(st);
+    if (removed) this.#save(st);
     return removed;
   }
 
@@ -321,7 +373,7 @@ export class ChatStore {
     const removed = st.messages.length;
     if (removed) {
       st.messages = [];
-      saveChat(st);
+      this.#save(st);
     }
     return removed;
   }
@@ -352,6 +404,7 @@ export class ChatStore {
   }
 
   #trim(st) {
+    if (st.archiveId) return; // Archive retention is explicit; context window size is separate.
     if (this.maxPerChat > 0 && st.messages.length > this.maxPerChat) {
       st.messages.splice(0, st.messages.length - this.maxPerChat);
     }
