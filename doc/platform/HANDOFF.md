@@ -22,6 +22,7 @@
 | 预算对真实调用生效 | 已接模型 HTTP 前后及主链上下文；生产启用强制准入与独立持久账本，重试/后续轮次/记忆使用隔离供应商验证；不宣称供应商账单硬封顶 |
 | 人设版本与旧历史迁移 | 旧档案已在上一阶段导入；本轮新增不可变人设版本、显式应用与 A/B/A 复用。保存版本不会直接改写当前聊天 |
 | 普通账号工作台 | 新增同站登录/注册、概览、聊天与人设、费用与额度、API 配置、账号设置；管理员另有平台设置、账号授权与高级控制台 |
+| 已审市场扩展 | 三个固定包与两项安装期修订已通过隔离加载和精确重放/回退，生产启用待验证；见扩展说明 |
 | 本轮生产状态 | 独立平台已部署并完成验收，旧 Bridge / DSH 已停止并禁用；本地账号与原 Cookie 不再回查旧服务。匿名公网、角色页面、普通账号本人资源/跨群隔离、撤销和财务保留已验证，见生产交接 |
 
 ## 关键代码
@@ -43,6 +44,8 @@
 | `test/conversation-*-test.mjs` | 新基础模块的独立边界测试 |
 | `test/_harness.mjs` | 原有模拟 QQ/模型及隔离数据脚手架 |
 | `scripts/local/Setup-Dev.ps1` | 准备本地 Node 与开发依赖，不运行 QQ 安装流程 |
+| `extensions.lock.json`、`scripts/install-reviewed-extensions.mjs` | 锁定已审市场包来源、原始/安装摘要和修订；默认只读预览、逐包安装与精确回退 |
+| `scripts/extensions/` | 针对固定原包的安装期 HTTP/聊天范围兼容修订，不在公共仓库附带第三方包源码 |
 | `scripts/check-platform-publication.mjs` | 检查本 fork 的新增/改动文件与新增历史，不把本机私有资料推上 Git |
 
 ## 拉取与继续开发
@@ -61,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\local\Setup-Dev.ps
 
 ## 下一步顺序
 
-独立平台部署、退役与回退见 [生产交接](PRODUCTION_HANDOFF.md)；数据表与逻辑 ER 见 [平台数据模型](PLATFORM_MODEL.md)，付费边界见 [生产费用保护](PAID_CALL_GUARD.md)。禁止重建旧 `authOrigin` 回查依赖。
+独立平台部署、退役与回退见 [生产交接](PRODUCTION_HANDOFF.md)；数据表与逻辑 ER 见 [平台数据模型](PLATFORM_MODEL.md)，付费边界见 [生产费用保护](PAID_CALL_GUARD.md)，已审插件选择与重放见 [扩展说明](EXTENSIONS.md)。禁止重建旧 `authOrigin` 回查依赖。
 
 1. 保持独立平台作为唯一运行入口，完成并维护生产迁移证据；下一次变更仍需隔离主链、页面和实际公开版本的相应核验，不能沿用旧结果代替验证。
 2. 保持统一授权、档案与模型守卫；新增工具或提供商必须有可信权限、费用报价和失败策略，未受保护的付费搜索/系统入口继续拒绝。

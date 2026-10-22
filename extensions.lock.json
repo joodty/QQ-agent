@@ -1,0 +1,196 @@
+{
+  "format": "qq-agent-extension-lock",
+  "version": 1,
+  "reviewedAt": "2026-10-23",
+  "runtimeBaseRef": "577229a1623323b43afa12bb7402b15979d87615",
+  "extensions": [
+    {
+      "id": "meal-picker",
+      "kind": "skill",
+      "name": "今天吃什么",
+      "version": "1.0.0",
+      "localRevision": "meal-picker-chat-scope-v1",
+      "source": {
+        "catalogUrl": "https://www.kondius.cn/api/community/skills",
+        "downloadUrl": "https://www.kondius.cn/api/community/skills/meal-picker/download",
+        "zipSha256": "a4c769f2e825589ead04f42bfad4c9ab77138a55f46e2c54a08e10d0d624a84d",
+        "zipBytes": 6894,
+        "marketAuthor": "XCZre",
+        "manifestAuthor": "QQ Agent 用户定制",
+        "updatedAt": "2026-10-21T18:24:49Z"
+      },
+      "moduleRoot": "meal-picker",
+      "manifest": "skill.json",
+      "sourceFiles": [
+        {
+          "path": "index.js",
+          "sha256": "53fa118279ed72442f093735426f9e83775c8ef730d587b3736d1bf5e05b8920",
+          "bytes": 14454
+        },
+        {
+          "path": "skill.json",
+          "sha256": "95c246086361ef6d5cb47e41e93553b816d57953486de78c864d7b979b2470c2",
+          "bytes": 2076
+        }
+      ],
+      "files": [
+        {
+          "path": "index.js",
+          "sha256": "a1359c10e80e02117514427d3015657503898327c796366c782d544279eaf30b",
+          "bytes": 14902
+        },
+        {
+          "path": "skill.json",
+          "sha256": "95c246086361ef6d5cb47e41e93553b816d57953486de78c864d7b979b2470c2",
+          "bytes": 2076
+        }
+      ],
+      "defaults": {
+        "enabled": true,
+        "settings": {
+          "lunchPerDay": 2,
+          "dinnerPerDay": 3,
+          "showCountry": true
+        }
+      },
+      "permissions": [],
+      "requires": [],
+      "capabilities": [],
+      "license": {
+        "status": "not-declared",
+        "redistributeSource": false
+      },
+      "adaptation": {
+        "id": "meal-picker-chat-scope-v1",
+        "script": "scripts/extensions/meal-compat.mjs",
+        "scriptSha256": "8a3b406ef20918fbcf6e7d83ce807df0d02e89b6d3e11c84615fdbf1d2590c74",
+        "sourceEntrySha256": "53fa118279ed72442f093735426f9e83775c8ef730d587b3736d1bf5e05b8920",
+        "installedEntrySha256": "a1359c10e80e02117514427d3015657503898327c796366c782d544279eaf30b"
+      }
+    },
+    {
+      "id": "my-weather",
+      "kind": "skill",
+      "name": "天气查询",
+      "version": "1.0.0",
+      "localRevision": "my-weather-body-bound-v1",
+      "source": {
+        "catalogUrl": "https://www.kondius.cn/api/community/skills",
+        "downloadUrl": "https://www.kondius.cn/api/community/skills/my-weather/download",
+        "zipSha256": "4117210c0f09611683c5b67ca12923f3f1860b0eacbf6d09169737c5da4a7262",
+        "zipBytes": 5132,
+        "marketAuthor": "正在加载",
+        "manifestAuthor": "本地自建",
+        "updatedAt": "2026-10-20T16:58:24Z"
+      },
+      "moduleRoot": "my-weather",
+      "manifest": "skill.json",
+      "sourceFiles": [
+        {
+          "path": "index.js",
+          "sha256": "b8f6199006adedac45931f66f5e58877a67f72f247debf8d5014a6fead2e497b",
+          "bytes": 8963
+        },
+        {
+          "path": "skill.json",
+          "sha256": "5aa52603f84817156d567183abc8e28de6aeb810887c32bc56589f2ecb8dba7f",
+          "bytes": 1959
+        }
+      ],
+      "files": [
+        {
+          "path": "index.js",
+          "sha256": "6d033fbdaae31bfaaa3efba7b7bb86987283798d2fddc2a121ac62a0678c4ab5",
+          "bytes": 10830
+        },
+        {
+          "path": "skill.json",
+          "sha256": "5aa52603f84817156d567183abc8e28de6aeb810887c32bc56589f2ecb8dba7f",
+          "bytes": 1959
+        }
+      ],
+      "defaults": {
+        "enabled": true,
+        "settings": {
+          "forecastDays": 2,
+          "timeoutMs": 8000
+        }
+      },
+      "permissions": [
+        "web_fetch"
+      ],
+      "requires": [],
+      "capabilities": [],
+      "license": {
+        "status": "not-declared",
+        "redistributeSource": false
+      },
+      "adaptation": {
+        "id": "my-weather-body-bound-v1",
+        "script": "scripts/extensions/weather-compat.mjs",
+        "scriptSha256": "bd1afacad7f21c9e2aae86d522ba02402c50c825a3fc0696078e6909c4c637e2",
+        "sourceEntrySha256": "b8f6199006adedac45931f66f5e58877a67f72f247debf8d5014a6fead2e497b",
+        "installedEntrySha256": "6d033fbdaae31bfaaa3efba7b7bb86987283798d2fddc2a121ac62a0678c4ab5"
+      }
+    },
+    {
+      "id": "ban-state",
+      "kind": "plugin",
+      "name": "群禁言状态",
+      "version": "1.0.0",
+      "localRevision": null,
+      "source": {
+        "catalogUrl": "https://www.kondius.cn/api/community/plugins",
+        "downloadUrl": "https://www.kondius.cn/api/community/plugins/ban-state/download",
+        "zipSha256": "05346c58297a5e2d8a5b73e3a3c10639f183c3e1b8491120f8cef48ee0d9d743",
+        "zipBytes": 3637,
+        "marketAuthor": "dragonadd",
+        "manifestAuthor": "QQ Agent",
+        "updatedAt": "2026-10-21T18:23:51Z"
+      },
+      "moduleRoot": "ban-state",
+      "manifest": "plugin.json",
+      "sourceFiles": [
+        {
+          "path": "index.js",
+          "sha256": "5f0891ece35625f18a6a291b861e597d7a914ddf91783fa842e1c53ffbbe54e3",
+          "bytes": 6257
+        },
+        {
+          "path": "plugin.json",
+          "sha256": "1ddecbb327724f37ffbef18ac8bdab0f278d70e7e457b2ddbd9117764afa527f",
+          "bytes": 999
+        }
+      ],
+      "files": [
+        {
+          "path": "index.js",
+          "sha256": "5f0891ece35625f18a6a291b861e597d7a914ddf91783fa842e1c53ffbbe54e3",
+          "bytes": 6257
+        },
+        {
+          "path": "plugin.json",
+          "sha256": "1ddecbb327724f37ffbef18ac8bdab0f278d70e7e457b2ddbd9117764afa527f",
+          "bytes": 999
+        }
+      ],
+      "defaults": {
+        "enabled": true,
+        "settings": {
+          "skipRunWhenMuted": true,
+          "markReadWhenMuted": true
+        }
+      },
+      "permissions": [],
+      "requires": [],
+      "capabilities": [
+        "chat.ban-state"
+      ],
+      "license": {
+        "status": "not-declared",
+        "redistributeSource": false
+      },
+      "adaptation": null
+    }
+  ]
+}
