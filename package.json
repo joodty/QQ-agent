@@ -63,7 +63,7 @@
     "test:coverage": "node test/coverage-offline.mjs && node test/coverage-http.mjs && node test/coverage-e2e.mjs && node test/coverage-ui.mjs && node test/coverage-wiring.mjs",
     "test:all": "npm test && npm run test:coverage && npm run test:platform && npm run test:archives && npm run test:paid-guard && npm run test:gateway",
     "test:paid-guard": "node --test test/paid-call-guard-test.mjs",
-    "test:gateway": "node --test test/admin-gateway-test.mjs",
+    "test:gateway": "node --test test/admin-gateway-test.mjs test/persona-gateway-ui-test.mjs",
     "admin:gateway": "node scripts/admin-gateway.mjs",
     "test:prompt": "node test/test-prompt.mjs && node test/prompt-anchor-test.mjs",
     "test:render": "node test/render-test.mjs",

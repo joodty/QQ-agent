@@ -458,10 +458,11 @@ function renderPersonaSection(c) {
 
   return `
     <h3>人设</h3>
+    <div class="hint" style="margin-bottom:12px">已导入档案的聊天使用<a href="/archives.html">会话档案</a>中所选的人设保留版本；本页的人设正文编辑只影响未使用导入档案的聊天，不会改写旧档案。</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-persona-unified" ${unified ? 'checked' : ''} />
       <label for="cfg-persona-unified">为所有的群聊/私聊使用同一个人设</label></div>
     <div class="hint" style="margin-bottom:12px">${unified
-      ? '所有会话共用下方这一套人设。'
+      ? '未使用导入档案的会话共用下方这一套人设。'
       : '每个会话独立人设：点按对应按钮弹窗编辑（● = 已配置独立人设；未配置的跟随全局人设的字段）。机器人名字/群内展示名是账号身份，只能全局设置。'}</div>
     <div id="persona-unified-box" style="${unified ? '' : 'display:none'}">
       ${unifiedEditor}
@@ -570,7 +571,7 @@ function openGlobalPersonaModal() {
 /**
  * 分会话人设编辑模态框：与统一编辑器同款字段（人设选择/添加/机器人名字沿用全局说明/参与度/
  * 角色设定/附加规则/系统提示词覆盖）。保存按钮直接 POST /api/config 落盘
- * （personaByChat 整体 __replace__），不经过表单自动保存链。
+ * （只更新当前 chatKey；null 表示取消覆写），不经过表单自动保存链。
  */
 function openPerChatPersonaModal(chatKey) {
   const conf = (state.config?.personaByChat || {})[chatKey] || {};
@@ -642,13 +643,10 @@ function openPerChatPersonaModal(chatKey) {
   //   2. 就算触发了，随后的 loadSettings() 重建表单 DOM，隐藏 input 被重渲染成
   //      GET 回来的旧值，用户刚写的条目被无声丢弃 → 重开 modal 一片空白。
   const saveToMap = async (entry) => {
-    const current = state.config?.personaByChat || {};
-    const next = { ...current };
-    if (entry) next[chatKey] = entry; else delete next[chatKey];
     try {
       const r = await api('/api/config', {
         method: 'POST',
-        body: JSON.stringify({ personaByChat: { __replace__: next } })
+        body: JSON.stringify({ personaByChat: { [chatKey]: entry ?? null } })
       });
       if (r?.config) state.config = r.config;
     } catch (e) {
@@ -671,11 +669,9 @@ function openPerChatPersonaModal(chatKey) {
     if (!roleText && !participation && !customRules && !sysPrompt) {
       try { await saveToMap(null); } catch { return; }   // 全空 = 清除独立人设
     } else {
-      const entry = {};
-      if (roleText) entry.roleText = roleText;
-      if (participation) entry.participation = participation;
-      if (customRules) entry.customRules = customRules;
-      if (sysPrompt) entry.systemPromptOverride = sysPrompt;
+      // Deep-merge preserves omitted fields. Send empty fields explicitly so
+      // clearing one field restores global inheritance instead of keeping it.
+      const entry = { roleText, participation, customRules, systemPromptOverride: sysPrompt };
       try { await saveToMap(entry); } catch { return; }
     }
     closeModelModal(overlay);
