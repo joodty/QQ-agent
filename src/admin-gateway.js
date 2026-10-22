@@ -1,10 +1,12 @@
-// A deployment adapter, not a second account system. The original bridge remains
-// authoritative for account cookies and roles; the Agent receives no browser cookie.
+// Standalone account front door. Native console access remains admin-only;
+// resource APIs verify the same local account store and exact conversation scope.
 import http from 'node:http';
+import { createPlatformAuth } from './platform-auth.js';
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'etag', 'last-modified', 'content-encoding']);
+const PUBLIC_STATIC = new Set(['/login.html', '/workspace.html', '/platform.js', '/platform.css', '/help.html', '/favicon.ico']);
 const CONFIG_FIELDS = new Set(['api', 'providers', 'dshProviderKeys', 'persona', 'personaByChat', 'personaUnified',
   'allow', 'deny', 'allowAllWhenEmpty', 'store', 'send', 'memory', 'groupSliderPos', 'unifiedTier', 'chatActive',
   'webSearch', 'proactive', 'tools', 'memberNotes', 'ui', 'peakSchedule', 'security', 'wakeDelayMs', 'drainDelayMs',
@@ -14,7 +16,7 @@ export function requireAccountRole(status, requiredRole = 'admin') {
   if (!['admin', 'user'].includes(requiredRole)) throw new Error('Unsupported required account role');
   if (status?.ok !== true || status.authenticated !== true || !status.user || status.user.disabled === true
       || typeof status.user.id !== 'string' || !status.user.id || status.user.id.length > 200
-      || !['admin', 'user'].includes(status.user.role)) throw fail(401, '请先在原管理页面登录账号');
+      || !['admin', 'user'].includes(status.user.role)) throw fail(401, '请先登录账号');
   if (requiredRole === 'admin' && status.user.role !== 'admin') throw fail(403, '此控制台仅向平台管理员开放');
   return { id: status.user.id, role: status.user.role };
 }
@@ -44,6 +46,7 @@ function safeConfigPatch(body) {
 
 export function adminProxyRouteAllowed(method, pathname, body) {
   if (['GET', 'HEAD'].includes(method)) {
+    if (/^\/api\/sessions\/[\w-]+\/raw$/.test(pathname)) return true;
     if (!pathname.startsWith('/api/')) return pathname === '/'
       || /^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:html|js|css|svg|png|ico|woff2?)$/.test(pathname);
     // Fixed read-only routes. Secret reveal, process controls, captcha forwarding,
@@ -63,17 +66,18 @@ export function adminProxyRouteAllowed(method, pathname, body) {
 }
 
 /** No global config imports: construction does not start QQ, models or a console. */
-export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.1:3100',
+export function createAdminGateway({ publicOrigin, platformAuth, platformFile,
   targetOrigin = 'http://127.0.0.1:3210', consoleToken, requiredRole = 'admin',
-  authTimeoutMs = 3000, upstreamTimeoutMs = 30000, sseRecheckMs = 5000, maxBodyBytes = 2 * 1024 * 1024 } = {}) {
+  upstreamTimeoutMs = 30000, sseRecheckMs = 5000, maxBodyBytes = 2 * 1024 * 1024 } = {}) {
   const publicUrl = new URL(publicOrigin);
   if (publicUrl.protocol !== 'https:' || publicUrl.username || publicUrl.password || publicUrl.pathname !== '/'
       || publicUrl.search || publicUrl.hash) throw new Error('publicOrigin must be an explicit HTTPS origin');
-  const authUrl = loopbackOrigin(authOrigin, 'authOrigin');
   const targetUrl = loopbackOrigin(targetOrigin, 'targetOrigin');
   if (typeof consoleToken !== 'string' || consoleToken.length < 24 || consoleToken.length > 256 || /[\r\n]/.test(consoleToken)) throw new Error('A private console token of at least 24 characters is required');
   if (requiredRole !== 'admin') throw new Error('The full Agent console requires the admin role');
   if (!Number.isFinite(sseRecheckMs) || sseRecheckMs < 20) throw new Error('Invalid SSE recheck interval');
+  if (!platformAuth && !platformFile) throw new Error('A standalone platform account database is required');
+  const accounts = platformAuth || createPlatformAuth({ file: platformFile, publicOrigin });
   const sockets = new Set();
   const active = new Set();
   const reply = (res, status, message) => {
@@ -82,29 +86,11 @@ export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.
       'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
     res.end(JSON.stringify({ ok: false, error: message }));
   };
-  const authenticate = cookie => new Promise((resolve, reject) => {
-    const request = http.request(new URL('/api/auth/status', authUrl), { method: 'GET', headers: {
-      host: authUrl.host, cookie, accept: 'application/json'
-    } }, response => {
-      let size = 0;
-      const chunks = [];
-      response.on('data', chunk => {
-        size += chunk.length;
-        if (size > 65536) response.destroy(new Error('Oversized auth response'));
-        else chunks.push(chunk);
-      });
-      response.on('error', () => reject(fail(503, '账号服务暂不可用，已停止访问')));
-      response.on('end', () => {
-        try {
-          if (response.statusCode !== 200) throw fail(503, '账号服务暂不可用，已停止访问');
-          resolve(requireAccountRole(JSON.parse(Buffer.concat(chunks).toString('utf8')), requiredRole));
-        } catch (error) { reject(error.statusCode ? error : fail(503, '账号服务返回异常，已停止访问')); }
-      });
-    });
-    request.setTimeout(authTimeoutMs, () => request.destroy(new Error('Auth timed out')));
-    request.on('error', () => reject(fail(503, '账号服务暂不可用，已停止访问')));
-    request.end();
-  });
+  const authenticate = async (cookie, adminOnly = true) => {
+    const principal = accounts.authenticate(cookie);
+    requireAccountRole({ ok: true, authenticated: !!principal, user: principal }, adminOnly ? 'admin' : 'user');
+    return principal;
+  };
   const readBody = req => new Promise((resolve, reject) => {
     const chunks = []; let size = 0, exceeded = false;
     req.on('data', chunk => {
@@ -130,26 +116,39 @@ export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.
     try { decoded = decodeURIComponent(url.pathname); } catch { throw fail(400, '无效路径编码'); }
     if (decoded.includes('\\') || decoded.includes('%') || decoded.split('/').some(part => part === '.' || part === '..')
         || url.origin !== publicUrl.origin) throw fail(400, '无效路径');
+    if (['GET', 'HEAD'].includes(req.method) && url.pathname === '/') {
+      res.writeHead(302, { location: '/workspace.html', 'cache-control': 'no-store' }); res.end(); return;
+    }
+    // Only the application owns its existing OneBot connection. A group claim
+    // must reach that trusted verifier instead of a second gateway-only auth instance.
+    if (url.pathname !== '/api/platform/groups/claim' && await accounts.handleHttp?.(req, res, url)) return;
+    const isPublicStatic = ['GET', 'HEAD'].includes(req.method) && PUBLIC_STATIC.has(url.pathname);
+    const isPlatformApi = url.pathname.startsWith('/api/platform/');
     const cookie = String(req.headers.cookie || '');
-    if (!cookie || cookie.length > 8192) throw fail(401, '请先在原管理页面登录账号');
-    await authenticate(cookie); // Never infer roles from client headers, query strings or cached UI state.
+    if (!isPublicStatic) {
+      if (!cookie || cookie.length > 8192) throw fail(401, '请先登录账号');
+      await authenticate(cookie, !isPlatformApi);
+    }
     let body = null, buffer = null;
     if (!['GET', 'HEAD'].includes(req.method)) {
       if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw fail(415, '请求必须使用 JSON');
       buffer = await readBody(req);
       try { body = JSON.parse(buffer.toString('utf8')); } catch { throw fail(400, 'JSON 格式无效'); }
     }
-    if (!adminProxyRouteAllowed(req.method, url.pathname, body)) throw fail(403, '该操作未开放；客户端进程、密钥查看和未接入预算的付费操作由服务器管理');
-    if (buffer) await authenticate(cookie); // Recheck after a potentially slow upload, before any write.
+    if (!isPublicStatic && !isPlatformApi && !adminProxyRouteAllowed(req.method, url.pathname, body)) throw fail(403, '该操作未开放；客户端进程、密钥查看和未接入预算的付费操作由服务器管理');
+    if (buffer) await authenticate(cookie, !isPlatformApi);
     // Query-string credentials are browser input, never credentials to the engine.
     for (const name of ['token', 'access_token', 'authorization', 'apiKey']) url.searchParams.delete(name);
-    const headers = { host: targetUrl.host, origin: targetUrl.origin, 'x-console-token': consoleToken,
+    const headers = { host: isPlatformApi ? publicUrl.host : targetUrl.host, origin: isPlatformApi ? publicUrl.origin : targetUrl.origin, 'x-console-token': consoleToken,
       accept: String(req.headers.accept || '*/*') };
+    if (isPlatformApi) headers.cookie = cookie;
     if (buffer) { headers['content-type'] = 'application/json'; headers['content-length'] = String(buffer.length); }
+    if (url.pathname === '/console.html') url.pathname = '/index.html';
     const upstream = http.request(new URL(url.pathname + url.search, targetUrl), { method: req.method, headers }, response => {
       const outgoing = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
         'x-qq-agent-console-mode': 'restricted-admin' };
       for (const [key, value] of Object.entries(response.headers)) if (RESPONSE_HEADERS.has(key) && value !== undefined) outgoing[key] = value;
+      if (isPlatformApi && response.headers['set-cookie']) outgoing['set-cookie'] = response.headers['set-cookie'];
       const isSse = String(response.headers['content-type'] || '').startsWith('text/event-stream');
       res.writeHead(response.statusCode || 502, outgoing);
       let timer = null, checking = false;
@@ -159,7 +158,7 @@ export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.
         timer = setInterval(async () => {
           if (checking) return;
           checking = true;
-          try { await authenticate(cookie); }
+          try { await authenticate(cookie, !isPlatformApi); }
           catch { response.destroy(); res.destroy(); }
           finally { checking = false; }
         }, sseRecheckMs);
@@ -194,6 +193,7 @@ export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.
       for (const request of active) request.destroy();
       for (const socket of sockets) socket.destroy();
       if (server.listening) await new Promise(resolve => server.close(resolve));
+      if (!platformAuth) accounts.close();
     }
   };
 }

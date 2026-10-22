@@ -173,11 +173,23 @@ function connectSSE() {
 }
 
 // ── 会话视图 ──
-async function loadSessions({ quiet = false } = {}) {
+let sessionPageLoading = false;
+async function loadSessions({ quiet = false, append = false } = {}) {
+  if (sessionPageLoading) return;
+  sessionPageLoading = true;
   try {
-    // 一次全取：后端上限 2^20（约等于不限），前端靠分页渲染（SESSION_PAGE）避免卡顿
-    const data = await api('/api/sessions?limit=1048576');
-    state.sessions = data.sessions || [];
+    const before = append ? state.sessionNextCursor : null;
+    const data = await api('/api/sessions?limit=' + SESSION_PAGE + (before ? '&before=' + encodeURIComponent(before) : ''));
+    if (data.reset) { state.sessions = []; state.sessionNextCursor = null; return; }
+    const page = data.sessions || [];
+    const previous = state.sessions || [];
+    const seen = new Set(page.map(item => item.id));
+    const reset = !append && (data.total <= page.length || data.total < previous.length);
+    state.sessions = append ? [...previous, ...page.filter(item => !previous.some(old => old.id === item.id))]
+      : reset ? page : [...page, ...previous.filter(item => !seen.has(item.id))];
+    state.sessionTotal = data.total ?? state.sessions.length;
+    if (append || reset || previous.length <= SESSION_PAGE) state.sessionNextCursor = data.nextCursor;
+    state.sessionLimit = state.sessions.length;
     renderSessionList();
     // 自动跟随最新运行中的会话
     if (state.autoFollowRunning && !state.currentSessionId) {
@@ -192,6 +204,7 @@ async function loadSessions({ quiet = false } = {}) {
       }
     }
   } catch (e) { if (!quiet) console.error(e); }
+  finally { sessionPageLoading = false; }
 }
 
 // 会话列表定时刷新：只要停在会话页，就持续更新列表（运行中会话也会轮询详情）
@@ -284,10 +297,7 @@ function attachScrollLoader(elId, onLoadMore) {
 function initSessionScrollLoader() {
   // 滚动源必须是真正 overflow 的列表容器（#session-items），不是外层 aside
   attachScrollLoader('session-items', () => {
-    const all = state.sessions || [];
-    if (state.sessionLimit >= all.length) return;   // 已经全显示了
-    state.sessionLimit = Math.min(all.length, state.sessionLimit + SESSION_PAGE);
-    renderSessionList();
+    if (state.sessionNextCursor) loadSessions({ append: true });
   });
 }
 
@@ -346,7 +356,8 @@ function renderSessionList() {
   state.sessionLimit = Math.max(SESSION_PAGE, Number(state.sessionLimit) || SESSION_PAGE);
   const all = state.sessions || [];
   const shown = all.slice(0, state.sessionLimit);
-  const rest = all.length - shown.length;
+  const total = state.sessionTotal ?? all.length;
+  const rest = Math.max(0, total - shown.length);
   box.innerHTML = shown.map((s) => {
     const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
     const waitHtml = s.status === 'waiting' && s.waitUntil
@@ -395,7 +406,7 @@ function renderSessionList() {
   // 头部显示总数（已显示 / 总数），便于确认分页是否真的加载完了
   const cnt = $('#session-count');
   if (cnt) {
-    cnt.textContent = all.length ? `${shown.length}/${all.length}` : '';
+    cnt.textContent = all.length ? `${shown.length}/${total}` : '';
   }
   for (const s of state.sessions) state.seenSessionIds.add(s.id);
   $$('.session-item', box).forEach((el) => {
@@ -513,6 +524,7 @@ async function loadSessionDetail(id, { quiet = false } = {}) {
 function renderSessionDetail(s) {
   const detail = $('#session-detail');
   if (!detail) return;
+  if (state.sessionJsonMode === s.id && state.sessionRawDetail?.id === s.id) s = state.sessionRawDetail;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
   const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
@@ -547,6 +559,7 @@ function renderSessionDetail(s) {
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
+    html.push('<p class="muted">以下是点击时读取的原始记录。返回普通视图可继续查看实时更新。</p>');
     // JSON 模式：原模原样展示输入给模型的内容 + 模型返回的原始内容
     const raw = {
       sessionId: s.id,
@@ -575,6 +588,7 @@ function renderSessionDetail(s) {
         <div class="coll-body" style="max-height:none">${esc(JSON.stringify(raw, null, 2))}</div>
       </details>`);
   } else {
+    if (s.rawAvailable) html.push('<p class="muted">完整提示词和原始模型结果保留在记录中，点击“JSON 模式”按需读取。</p>');
     if (s.systemPrompt) {
       html.push(`
         <details class="collapsible">
@@ -689,10 +703,18 @@ function renderSessionDetail(s) {
   // 切换会话（首次渲染）时详情整体淡入；轮询/SSE 的原地刷新不播，避免运行中闪烁
   if (firstRender) uiEnter(detail);
   const jsonBtn = $('#json-mode-btn');
-  if (jsonBtn) jsonBtn.addEventListener('click', () => {
-    state.sessionJsonMode = state.sessionJsonMode === s.id ? null : s.id;
-    lastDetailFp = null;   // 强制重渲染
-    renderSessionDetail(s);
+  if (jsonBtn) jsonBtn.addEventListener('click', async () => {
+    const opening = state.sessionJsonMode !== s.id;
+    jsonBtn.disabled = true;
+    try {
+      const detailValue = opening ? await api(`/api/sessions/${encodeURIComponent(s.id)}/raw`) : (state.sessionDetail || s);
+      if (state.currentSessionId !== s.id) return;
+      state.sessionJsonMode = opening ? s.id : null;
+      state.sessionRawDetail = opening ? detailValue : null;
+      lastDetailFp = null;
+      renderSessionDetail(detailValue);
+    } catch (error) { alert(`读取原始记录失败：${error.message}`); }
+    finally { if (jsonBtn.isConnected) jsonBtn.disabled = false; }
   });
   // 删除这条会话记录
   const delBtn = $('#session-delete-btn');

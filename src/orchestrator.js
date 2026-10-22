@@ -35,7 +35,8 @@ export class Orchestrator {
     // 事件出口：正常情况下由 app.js 注入（转发到 SSE）。
     // 兜底必须是**明确的 no-op** —— 早先用 createEventBus() 兜底，
     // 但那个总线上永远没人订阅，事件会被静默吞掉，排查时看不到任何线索。
-    this.emit = typeof emit === 'function' ? emit : () => {};
+    const publish = typeof emit === 'function' ? emit : () => {};
+    this.emit = (type, payload) => publish(type, type === 'session-update' && typeof payload === 'string' ? { sessionId: payload } : payload);
     this.toolDefs = buildToolDefs();
 
     this.chatNameCache = new Map();    // groupId -> name

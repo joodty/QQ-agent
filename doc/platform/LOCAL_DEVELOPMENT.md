@@ -58,9 +58,10 @@ npm run check:public
 | 命令 | 证明的范围 |
 | --- | --- |
 | `npm run test:platform` | 新增通用上下文、预算内核和发布检查的隔离测试；不代表 QQ 主链路已接通 |
+| `npm run test:workspace` | 独立账号/RBAC、账号迁移、业务/加密 Key/费用来源、离线导出与真实隔离 app+网关+OneBot 主链；无真实 QQ/模型 |
 | `npm test` | 上游原有模拟 QQ/模型、工具、消息、用量和安装器测试集合 |
 | `npm run test:coverage` | 上游模块、HTTP、端到端与界面检查；界面接线依赖 lockfile 中的 jsdom |
-| `npm run test:all` | 顺序运行上游测试、覆盖测试和平台核心测试；前项失败会阻止后项 |
+| `npm run test:all` | 顺序运行上游、覆盖、平台基础、档案、生产守卫、网关与独立工作台测试；前项失败会阻止后项，已知基线失败时应逐项补跑并保留失败 |
 | `npm run check:public` | 本次扩展的公开资料与私密标识检查，不替代人工审阅 |
 
 上游测试主要使用本机 HTTP/WebSocket 夹具与临时数据目录。运行结果必须分别记录 pass、fail、known、skip；退出码为 0 也不代表全部项目都实际运行或所有已知缺陷已修复。初次基线的具体结果见 [工作记录](WORK_LOG.md)。

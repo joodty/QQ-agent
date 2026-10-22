@@ -27,6 +27,8 @@ import { loadPlugins, watchPlugins } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
 import { extractCandidateUrls, dispatchMediaLinks } from './media-links.js';
 import { createRoutes } from './routes.js';
+import { createPlatformAuth } from './platform-auth.js';
+import { createPlatformBusiness } from './platform-business.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -85,6 +87,9 @@ const appLogFns = new WeakSet();
 
 export function createApp({ log = console.log } = {}) {
   const cfg = getConfig();
+  const platformOrigin = cfg.platform?.publicOrigin || process.env.QQ_AGENT_PUBLIC_ORIGIN || '';
+  const platformEnabled = cfg.platform?.enabled === true || Boolean(platformOrigin);
+  if (platformEnabled && !platformOrigin) throw new Error('账号工作台需要明确的公开访问地址');
 
   // 详尽日志：把 createApp 的 log 接到分级日志系统（落盘 + 内存缓冲 + SSE）。
   // 关键：logger 的 mirrorConsole 已经会走 console，所以这里**只写 logger、不再调原 log**，
@@ -602,7 +607,7 @@ export function createApp({ log = console.log } = {}) {
             usage: s.usage ?? null,
             trigger: s.triggerSummary ?? '',
             triggerSummary: s.triggerSummary ?? '',
-            messages: s.messages ?? [],
+            messages: (s.messages ?? []).map(({ raw, ...message }) => message),
             // sent/finishReason/error/endedAt 必须随 SSE 推下去：
             // 曾经载荷里没有它们，"已发送到 QQ"徽标只能等 HTTP 轮询带回来；
             // 而会话一结束轮询就不再拉详情（只刷 running/waiting），
@@ -631,7 +636,7 @@ export function createApp({ log = console.log } = {}) {
   const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
   const archiveFile = path.join(DATA_DIR, 'conversation-archives.sqlite');
   let archives = null;
-  if (fs.existsSync(archiveFile)) {
+  if (fs.existsSync(archiveFile) || platformEnabled) {
     if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('已导入的 SQLite 人设档案需要 Node 24，请使用本地开发脚本准备运行环境');
     const { ConversationArchives } = createRequire(import.meta.url)('./conversation-archives.js');
     archives = new ConversationArchives({ file: archiveFile });
@@ -648,14 +653,47 @@ export function createApp({ log = console.log } = {}) {
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
   const stickers = new StickerManager(onebot);
+  const departedGroups = new Set();
   const sender =   new SendQueue({
     onebot, store,
+    canSend: chatKey => !departedGroups.has(chatKey),
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
     log
   });
   const reminders = new ReminderStore();
   const videoReader = new VideoReader(onebot);
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit, reminders, videoReader });
+  const platformAuth = platformEnabled ? createPlatformAuth({
+    file: cfg.platform?.file || path.join(DATA_DIR, 'platform.sqlite'), publicOrigin: platformOrigin,
+    getConversationKeys: () => store.listChats(),
+    verifyGroupMember: async ({ groupId, qq }) => {
+      const groups = await onebot.call('get_group_list', {});
+      for (const group of Array.isArray(groups) ? groups : []) {
+        if (group.group_name) orchestrator.chatNameCache.set(String(group.group_id), String(group.group_name));
+      }
+      if (!Array.isArray(groups) || !groups.some(group => String(group.group_id) === String(groupId))) return { botInGroup: false };
+      const info = await onebot.getGroupMemberInfo(groupId, qq);
+      return { role: info?.role, user_id: info?.user_id, group_id: info?.group_id, botInGroup: true };
+    }
+  }) : null;
+  const platformBusiness = platformEnabled ? createPlatformBusiness({
+    file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
+    archives, store, orchestrator, auth: platformAuth, config: getConfig
+  }) : null;
+  let groupPermissionRefresh = null;
+  const groupPermissionTimer = platformAuth ? setInterval(() => {
+    if (groupPermissionRefresh) return;
+    groupPermissionRefresh = platformAuth.refreshGroupPermissions()
+      .catch(() => log('[权限] 群身份刷新失败，过期权限将停止生效'))
+      .finally(() => { groupPermissionRefresh = null; });
+  }, 30000) : null;
+  groupPermissionTimer?.unref?.();
+  function resourceAllowed(kind, id, current) {
+    if (kind === 'group' && departedGroups.has(`group:${id}`)) return false;
+    const denied = current.deny?.[kind] ?? current.deny?.[`${kind}s`] ?? [];
+    if (denied.map(String).includes(String(id))) return false;
+    return allowed(kind, id, current) || Boolean(platformBusiness?.runtimeAllowed(`${kind}:${id}`));
+  }
 
   // 远程价格表固定为官网公开地址；不从用户配置读取，避免被页面/配置篡改。
   initPriceFeed(FIXED_PRICE_FEED_URL);
@@ -833,7 +871,7 @@ export function createApp({ log = console.log } = {}) {
 
   async function ingestMessage(kind, id, event) {
     const cfgNow = getConfig();
-    if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
+    if (!resourceAllowed(kind, id, cfgNow)) return; // 授权和出资均未就绪的聊天完全不记录
 
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
@@ -986,7 +1024,7 @@ export function createApp({ log = console.log } = {}) {
     const isGroup = event.group_id != null;
     const id = isGroup ? String(event.group_id) : String(event.user_id);
     const cfgNow = getConfig();
-    if (!allowed(isGroup ? 'group' : 'private', id, cfgNow)) return;
+    if (!resourceAllowed(isGroup ? 'group' : 'private', id, cfgNow)) return;
 
     const operatorId = String(event.user_id ?? '');
     // 自己拍的拍（send_poke 的 OneBot 回显）不触发处理——与 message_sent 同理，发送时已留档
@@ -1048,17 +1086,36 @@ export function createApp({ log = console.log } = {}) {
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
       if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
-      // The retained account bridge owns this non-paid verification protocol.
-      // Do not put one-time ownership codes into model history or charge for them.
+      // Ownership verification is a non-paid local account operation. It runs
+      // before chat allowlists and never enters model history or the send queue.
       if (event.message_type === 'private') {
         const plain = (Array.isArray(event.message)
           ? event.message.filter(segment => segment?.type === 'text').map(segment => segment.data?.text || '').join('')
           : typeof event.message === 'string' ? event.message : '').trim();
+        const binding = platformAuth?.consumeBinding({ private: true, botId: 'primary', qq: String(event.user_id ?? ''), text: plain });
+        if (binding?.consumed) {
+          if (binding.reply) await onebot.sendText('private', String(event.user_id), binding.reply);
+          return;
+        }
         if (/^(?:绑定|\/bind)\s+[A-Za-z0-9_-]{12}$/.test(plain)) return;
       }
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;
+    }
+    if (event.post_type === 'notice' && ['group_admin', 'group_decrease'].includes(event.notice_type) && event.group_id != null) {
+      // A OneBot user_id is a QQ identity, not the web account ID accepted by
+      // invalidateGroup. Invalidate automatic proofs for this group together;
+      // fresh verification restores only managers who still qualify.
+      platformAuth?.invalidateGroup({ botId: 'primary', groupId: String(event.group_id) });
+      if (event.notice_type === 'group_decrease' && String(event.user_id) === String(onebot.selfId)) {
+        const chatKey = `group:${event.group_id}`;
+        departedGroups.add(chatKey);
+        orchestrator.archiveChanged(chatKey);
+      }
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'group_increase' && String(event.user_id) === String(onebot.selfId)) {
+      departedGroups.delete(`group:${event.group_id}`);
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
       return ingestPoke(event);
@@ -1307,6 +1364,7 @@ export function createApp({ log = console.log } = {}) {
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
     store, memory, sessions, onebot, orchestrator,
+    platformAuth, platformBusiness,
     emit, log,
     localVersion, compareSemver, UPDATE_INFO_URL,
     sanitizeConfig, keyEndpointAllowed, sanitizeProvider,
@@ -1322,6 +1380,30 @@ export function createApp({ log = console.log } = {}) {
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
+
+    // Cloud accounts have their own Cookie/RBAC boundary. A browser-supplied
+    // console header is replaced by the gateway; the engine requires its exact
+    // private value and the configured public origin, then independently checks
+    // the authoritative account store before any resource service runs.
+    if (pathname.startsWith('/api/auth/') || pathname.startsWith('/api/platform/')) {
+      if (!platformAuth || !platformBusiness) return json(res, 503, { error: '账号工作台尚未启用' });
+      if (!getConfig().server?.token || req.headers['x-console-token'] !== getConfig().server.token) return json(res, 401, { error: '未授权' });
+      const expected = new URL(platformOrigin);
+      if (req.headers.host !== expected.host || req.headers.origin && req.headers.origin !== expected.origin
+          || req.headers['sec-fetch-site'] === 'cross-site'
+          || !['GET', 'HEAD'].includes(req.method) && req.headers.origin !== expected.origin) return json(res, 403, { error: '请求来源不被信任' });
+      if (await platformAuth.handleHttp(req, res, url)) return;
+      const principal = platformAuth.authenticate(String(req.headers.cookie || ''));
+      if (!principal) return json(res, 401, { error: '请先登录' });
+      try {
+        const fresh = platformAuth.verifyPrincipal(principal);
+        for (const route of apiRoutes) {
+          if (route.method !== req.method || typeof route.pattern !== 'string' || route.pattern !== pathname) continue;
+          return await route.handler({ req, res, url, pathname, method: req.method, json, principal: fresh });
+        }
+        return json(res, 404, { error: '工作台接口不存在' });
+      } catch (error) { return json(res, error.statusCode || error.status || 500, { error: error.statusCode || error.expose ? error.message : '工作台操作未完成，请稍后重试' }); }
+    }
 
     // SSE
     if (pathname === '/api/events' && req.method === 'GET') {
@@ -1393,7 +1475,7 @@ export function createApp({ log = console.log } = {}) {
       // 正确做法：先 URL 解码 → 规范化 → 拼接 → 用 path.relative 判断跳出界。
       let decoded;
       try {
-        decoded = decodeURIComponent(pathname === '/' ? '/index.html' : pathname);
+        decoded = decodeURIComponent(pathname === '/' ? platformEnabled ? '/workspace.html' : '/index.html' : pathname === '/console.html' ? '/index.html' : pathname);
       } catch {
         res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('Bad Request');
@@ -1652,6 +1734,8 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function stop() {
+    if (groupPermissionTimer) clearInterval(groupPermissionTimer);
+    await groupPermissionRefresh;
     // 先停掉热重载 watcher：否则 stop() 之后文件变动仍会触发重载 + 广播
     try { pluginWatcher?.close?.(); } catch { /* ignore */ }
     pluginWatcher = null;
@@ -1659,6 +1743,8 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.stopReminderLoop();
     await orchestrator.whenArchiveIdle?.();
     await sender.whenIdle?.();
+    platformBusiness?.close();
+    platformAuth?.close();
     archives?.close();
     if (communitySyncTimer) clearInterval(communitySyncTimer);
     if (obPortPollTimer) clearInterval(obPortPollTimer);
@@ -1684,7 +1770,7 @@ export function createApp({ log = console.log } = {}) {
     releaseInstanceLock();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
 }
 
 /**

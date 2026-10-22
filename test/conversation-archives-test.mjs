@@ -66,7 +66,7 @@ test('inactive legacy archives retain all evidence but cannot be selected or wri
   }
   assert.equal(f.store.importBundle(source, { dryRun: false }).selectionsBlocked, 2);
   const db = new DatabaseSync(f.file, { readOnly: true }); try {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
     assert.equal(db.prepare("SELECT COUNT(*) n FROM archive_imports WHERE kind='selection'").get().n, 2);
   } finally { db.close(); }
   const changed = structuredClone(source); changed.archives[0].continuation = 'ready';
@@ -210,6 +210,25 @@ test('large passive archives retain data and use bounded hot reads', t => {
   const readStart = performance.now(); for (let index = 0; index < 30; index++) assert.equal(f.store.readChat('group:101').messages.length, 10000); const readMs = performance.now() - readStart;
   assert.deepEqual(f.store.transcript('group:101'), source.archives[0].transcript);
   t.diagnostic(`fixture archive bytes=${Buffer.byteLength(JSON.stringify(source))}; active 30=${activeMs.toFixed(1)}ms; readChat 30=${readMs.toFixed(1)}ms`);
+});
+
+test('schema two migrates counts atomically without modifying retained history and dry-run remains read only',t=>{
+  const f=fixture(t);f.store.importBundle(bundle(),{dryRun:false});f.store.close();
+  let db=new DatabaseSync(f.file);db.exec('DROP INDEX archive_chat_lookup; ALTER TABLE conversation_archives DROP COLUMN message_count; ALTER TABLE conversation_archives DROP COLUMN transcript_count; PRAGMA user_version=2');
+  const before=db.prepare('SELECT id,chat_json,transcript_json FROM conversation_archives ORDER BY id').all();db.close();
+  const store=f.create(),original=digest(f.file);assert.equal(store.importBundle(bundle()).dryRun,true);assert.equal(digest(f.file),original);
+  store.upgradeSchema();db=new DatabaseSync(f.file,{readOnly:true});assert.equal(db.prepare('PRAGMA user_version').get().user_version,3);assert.deepEqual(db.prepare('SELECT id,chat_json,transcript_json FROM conversation_archives ORDER BY id').all(),before);db.close();
+  assert.equal(store.list('group:101')[0].messageCount,1);
+});
+
+test('metadata and validated repeated writes do not reload unrelated passive transcripts; external corruption invalidates validation',t=>{
+  const f=fixture(t);f.store.importBundle(bundle(),{dryRun:false});append(f.store,'group:101','first validated write');
+  const load=f.store._load.bind(f.store);let loads=0;f.store._load=(...args)=>{loads++;return load(...args);};
+  assert.equal(f.store.listChats().length,2);assert.equal(f.store.list('group:101',{limit:1,offset:1}).length,1);
+  append(f.store,'group:101','second targeted write');assert.equal(loads,0);
+  const db=new DatabaseSync(f.file);db.prepare('UPDATE conversation_archives SET transcript_json=? WHERE id=?').run('{broken fixture','private-a');db.close();
+  assert.throws(()=>append(f.store,'group:101','must not commit'),e=>e.statusCode===503);assert.equal(loads,1);
+  assert.equal(f.store.readChat('group:101').messages.at(-1).text,'second targeted write');
 });
 
 test('unrelated existing databases and invalid file identities are never repurposed', t => {

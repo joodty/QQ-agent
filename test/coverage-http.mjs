@@ -325,7 +325,7 @@ c.section('5. 提供商 / 模型目录 / 搜索服务');
   let providerId = null;
   await c.check('POST /api/providers：新增提供商', async () => {
     const r = await hit('POST', '/api/providers', {
-      body: { baseUrl: `http://127.0.0.1:${llm.server.address().port}/v1`, apiKey: 'provider-secret-key', models: ['test-model-a'] }
+      body: { baseUrl: `http://127.0.0.1:${llm.server.address().port}/v1`, apiKey: 'fixture-provider-secret-key', models: ['test-model-a'] }
     });
     assert.equal(r.status, 200);
     assert.equal(r.data.ok, true);
@@ -492,6 +492,16 @@ c.section('7. 会话 / 存档 / 记忆');
     assert.equal(r.status, 200);
     assert.equal(r.data.id, sessionId);
     assert.ok('systemPrompt' in r.data || 'messages' in r.data, '应含提示词或消息序列');
+  });
+
+  await c.check('GET /api/sessions/:id/raw：原始输入按需读取，默认详情不携带大型提示词', async () => {
+    const detail = await hit('GET', `/api/sessions/${sessionId}`);
+    const raw = await hit('GET', `/api/sessions/${sessionId}/raw`);
+    assert.equal(raw.status, 200);
+    assert.equal(detail.data.inputMessages, undefined);
+    assert.equal(detail.data.systemPrompt, undefined);
+    assert.ok(Array.isArray(raw.data.messages));
+    assert.deepEqual(raw.data.messages, app.sessions.get(sessionId).messages, '显式原始记录与持久化源一致');
   });
 
   await c.check('GET /api/sessions/:id：不存在的会话返回 404', async () => {
@@ -760,7 +770,7 @@ c.section('10. 进程管理（安全分支）');
 c.section('11. 媒体取图与 SSRF');
 {
   let internalHit = 0;
-  const SECRET = 'INTERNAL-SECRET-CONTENT';
+  const SECRET = 'FIXTURE-INTERNAL-SECRET-CONTENT';
   const internal = http.createServer((_req, res) => {
     internalHit++;
     res.writeHead(200, { 'content-type': 'image/png' });

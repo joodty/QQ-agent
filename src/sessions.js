@@ -321,6 +321,18 @@ export class SessionRegistry {
     }
   }
 
+  /** Human-readable detail projection; full provider raw stays on disk and is
+   * retrieved only when an administrator explicitly opens JSON mode. */
+  view(id) {
+    const value = this.peek(id);
+    if (!value) return null;
+    const { inputMessages, systemPrompt, userPrompt, ...visible } = value;
+    return structuredClone({ ...visible,
+      rawAvailable: Boolean(inputMessages?.length || systemPrompt || userPrompt || (value.messages || []).some(message => message?.raw != null)),
+      messages: (value.messages || []).map(({ raw, ...message }) => message)
+    });
+  }
+
   update(id) {
     const s = this.current.get(id);
     if (s) {
@@ -440,6 +452,14 @@ export class SessionRegistry {
 
   listSummaries(limit = 100) {
     return this.index.slice(0, limit);
+  }
+
+  listPage({ limit = 50, before = null } = {}) {
+    const start = before ? this.index.findIndex(entry => entry.id === before) + 1 : 0;
+    if (before && start === 0) return { sessions: [], total: this.index.length, nextCursor: null, reset: true };
+    const page = this.index.slice(start, start + limit);
+    return { sessions: page, total: this.index.length,
+      nextCursor: start + page.length < this.index.length ? page.at(-1)?.id ?? null : null };
   }
 
   /** 今日 token 统计（含运行中的）。 */

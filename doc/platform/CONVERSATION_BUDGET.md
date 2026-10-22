@@ -2,7 +2,7 @@
 
 ## 当前实现状态
 
-`src/conversation-budget.js` 已实现独立预算内核，`test/conversation-budget-test.mjs` 使用隔离存储、SQLite 夹具与多进程验证。现在由可选的 `productionBudget` 生产调用守卫接入模型 HTTP 请求前后、主链上下文及专用额度页面，详见 [生产费用保护](PAID_CALL_GUARD.md)。**仅导入预算模块不会启用限额；生产还须显式启用保护、提供有效报价与出资授权，并完成部署验收。** 当前只开放明确的平台出资对象，普通账号体验和用户 Key 尚待适配；真实迁移与上线状态见 [工作记录](WORK_LOG.md)。
+`src/conversation-budget.js` 已实现独立预算内核，`test/conversation-budget-test.mjs` 使用隔离存储、SQLite 夹具与多进程验证。现在由可选的 `productionBudget` 生产调用守卫接入模型 HTTP 请求前后、主链上下文及额度页面，详见 [生产费用保护](PAID_CALL_GUARD.md)。**仅导入预算模块不会启用限额；生产还须显式启用保护、提供有效报价与出资授权，并完成部署验收。** 新独立工作台为平台出资、绑定本人私聊体验与用户 Key 注入同一可信解析服务，体验同时检查个人与平台总额；迁移与上线事实见 [工作记录](WORK_LOG.md)。
 
 该能力只认识 `botId + group:群号/private:QQ号`。平台管理员、普通用户、群管理者、自带 Key 或平台 Key 不改变预算算法。同一个群的多个管理者共用一份账本；同号的群聊与私聊属于不同对象。权限验证必须由调用层完成，不能把网页自报的会话或付款人当成可信授权。
 

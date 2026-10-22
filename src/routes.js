@@ -86,6 +86,7 @@ export function createRoutes(deps) {
   };
 
   return [
+    ...createPlatformResourceRoutes(deps),
     {
       method: 'GET', pattern: '/api/production-budgets',
       handler: async ({ res, json }) => {
@@ -1183,16 +1184,23 @@ export function createRoutes(deps) {
     {
       method: 'GET', pattern: '/api/sessions',
       handler: async ({ res, json, url }) => {
-        const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        return json(res, 200, { sessions: sessions.listSummaries(limit) });
+        const limit = Math.min(500, Math.max(1, Math.trunc(Number(url.searchParams.get('limit')) || 50)));
+        return json(res, 200, sessions.listPage({ limit, before: url.searchParams.get('before') }));
       }
     },
     {
       method: 'GET', pattern: /^\/api\/sessions\/([\w-]+)$/,
       handler: async ({ res, json, match }) => {
-        const s = sessions.get(match[1]);
+        const s = sessions.view(match[1]);
         if (!s) return json(res, 404, { error: '会话不存在' });
         return json(res, 200, s);
+      }
+    },
+    {
+      method: 'GET', pattern: /^\/api\/sessions\/([\w-]+)\/raw$/,
+      handler: async ({ res, json, match }) => {
+        const session = sessions.get(match[1]);
+        return session ? json(res, 200, session) : json(res, 404, { error: '会话不存在' });
       }
     },
     {
@@ -1615,5 +1623,47 @@ export function createRoutes(deps) {
         return undefined;   // 已自行写响应
       }
     },
+  ];
+}
+
+/** Public workspace services always receive a server-verified Cookie principal.
+ * Native administrator tokens alone cannot impersonate a resource owner. */
+export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, readBody, onebot, orchestrator }) {
+  const get = (path, work) => ({ method: 'GET', pattern: '/api/platform/' + path, handler: async ctx => {
+    const principal = auth.verifyPrincipal(ctx.principal);
+    const chatKey = ctx.url.searchParams.get('chatKey');
+    if (chatKey) await auth.ensureAccess(principal, chatKey, { botId: 'primary' });
+    return ctx.json(ctx.res, 200, await work(principal, ctx.url.searchParams));
+  }});
+  const write = (method, path, work) => ({ method, pattern: '/api/platform/' + path, handler: async ctx => {
+    const principal = auth.verifyPrincipal(ctx.principal), input = await readBody(ctx.req);
+    if (input.chatKey) await auth.ensureAccess(principal, input.chatKey, { botId: 'primary', write: true });
+    return ctx.json(ctx.res, 200, await work(principal, input));
+  }});
+  return [
+    get('overview', principal => {
+      const result = business.overview(principal);
+      return { ...result, scopes: result.scopes.map(scope => ({ ...scope,
+        name: scope.chatKey.startsWith('group:') ? orchestrator?.chatNameCache?.get(scope.chatKey.slice(6)) || '' : '本人私聊'
+      })), bot: { qq: onebot.selfId || null } };
+    }),
+    get('personas', (principal, query) => business.personas(principal, query.get('chatKey'))),
+    write('POST', 'personas', (principal, input) => business.createPersona(principal, input)),
+    write('PUT', 'personas', (principal, input) => business.updatePersona(principal, input)),
+    get('persona-history', (principal, query) => business.personaHistory(principal, { chatKey: query.get('chatKey'), id: query.get('id') })),
+    get('messages', (principal, query) => business.messages(principal, { chatKey: query.get('chatKey'), ...(query.get('archiveId') ? { archiveId: query.get('archiveId') } : {}), limit: 100 })),
+    write('POST', 'archives', (principal, input) => business.applyPersona(principal, input)),
+    write('POST', 'archives/select', (principal, input) => business.selectArchive(principal, input)),
+    get('credentials', principal => business.credentials(principal)),
+    write('PUT', 'credentials', (principal, input) => business.saveCredential(principal, input)),
+    get('funding', (principal, query) => business.funding(principal, query.get('chatKey'))),
+    write('PUT', 'funding', (principal, input) => business.setFunding(principal, input)),
+    get('budgets', principal => business.budgets(principal)),
+    write('PUT', 'budgets', (principal, input) => business.updateBudget(principal, input)),
+    get('usage', (principal, query) => business.usage(principal, { ...(query.get('chatKey') ? { chatKey: query.get('chatKey') } : {}), ...(query.get('date') ? { date: query.get('date') } : {}) })),
+    get('templates', async () => {
+      const { PERSONAS } = await import('./personas.js');
+      return { templates: Object.entries(PERSONAS).map(([id, value]) => ({ id, name: value.name, text: value.text })) };
+    })
   ];
 }

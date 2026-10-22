@@ -3,7 +3,7 @@
 import { getConfig } from './config.js';
 import { resolveModelPrice, priceAt } from './model-prices.js';
 import { skillManager } from './skills/manager.js';
-import { productionPaidCallGuard } from './paid-call-guard.js';
+import { productionPaidCallGuard, resolvePaidConversationApi, capturePaidAuthority } from './paid-call-guard.js';
 import {
   resolveThinkingRequest, buildThinkingParams, stripThinkingParams,
   looksLikeThinkingRejection, extractReasoning, extractReasoningTokens, THINKING_BODY_KEYS
@@ -228,7 +228,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
         r._usedModel = r.model || (overrides?.model ?? getConfig().api?.model ?? '');
         // 把"这次实际用的端点"一并带回去：备选模型可能来自**另一个 provider**，
         // 调用方要据此同步 vendor，否则成本看板的「渠道：模型」聚合会串味。
-        r._usedApi = overrides ?? getConfig().api;
+        r._usedApi = r._usedApi || overrides || getConfig().api;
         return r;
       } catch (error) {
         if (String(error?.code || '').startsWith('PAID_')) throw error;
@@ -269,7 +269,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
  *    所以 Skill 只能给函数（改 body / 给建议），重试动作由本函数执行。
  */
 export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null, skillContext = null, maxTokens = 0, purpose = 'chat' }) {
-  const baseApi = overrides || effectiveApi();
+  const baseApi = resolvePaidConversationApi(overrides || effectiveApi(), { explicitOverride:Boolean(overrides) });
   // 主调用路径才切"图片/视频专用模型"（见 specializedModelFor 注释）
   let api = baseApi;
   let poolAccountId = '';
@@ -298,7 +298,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     const forced = specializedModelFor(messages, getConfig());
     if (forced && forced !== api.model) api = { ...api, model: forced };
   }
-  const ctx = skillContext || { api, model: api.model, messages };
+  const ctx = { ...(skillContext || {}), api, model: api.model, messages };
 
   const buildBaseBody = () => {
     const body = {
@@ -388,6 +388,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
       sent = true;
       const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
         method: 'POST',
+        redirect: 'error',
         headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
         body: JSON.stringify(body),
         signal: controller.signal
@@ -396,6 +397,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
       if (guard) {
         try { guard.complete(hold, { text, status: res.status }); }
         catch (cause) { throw Object.assign(Error('费用入账未完成，已暂停进一步付费调用'), { code: 'PAID_LEDGER_UNAVAILABLE', cause }); }
+        capturePaidAuthority(hold.key);
       }
       return { ok: res.ok, status: res.status, text, contentType: res.headers.get('content-type') || '' };
     } catch (e) {
@@ -499,6 +501,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
   if (!choice) throw new Error(`模型 API 响应缺少 choices：${JSON.stringify(data).slice(0, 300)}`);
 
   const result = {
+    _usedApi: { baseUrl: api.baseUrl, model: api.model },
     message: choice.message ?? {},
     finishReason: choice.finish_reason ?? null,
     usage: data.usage ?? null,

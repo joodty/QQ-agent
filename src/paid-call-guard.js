@@ -17,6 +17,44 @@ const isDate = x => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !N
 const stable = x => Array.isArray(x) ? '[' + x.map(stable).join(',') + ']' : plain(x) ? '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + stable(x[k])).join(',') + '}' : JSON.stringify(x);
 const hash = x => crypto.createHash('sha256').update(stable(x)).digest('hex');
 const fundingFingerprint = (p, key) => hash({ endpoint: p.endpoint, model: p.model, prices: p.prices, funding: p.funding[key], outputCap: p.outputCap, imageTokensPerImage: p.imageTokensPerImage ?? null, responseModels: p.verifiedResponseModels || [] });
+let fundingServices = null;
+export function setPaidCallFundingServices(services) {
+  if (services !== null && (typeof services?.resolve !== 'function' || typeof services?.policy !== 'function')) throw error('出资解析服务无效');
+  fundingServices = services;
+}
+function effectivePolicy(config) {
+  const p = policy(config), extra = fundingServices?.policy() || {};
+  if (extra.overrides) for (const [key, amount] of Object.entries(extra.overrides)) { if (!chatKey(key) || !money(amount)) throw error('出资额度无效'); }
+  return { ...p, overrides: { ...p.overrides, ...(extra.overrides || {}) }, trial: extra.trial || null };
+}
+function sourceFor(config, key) {
+  const p = effectivePolicy(config), resolved = fundingServices?.resolve(key);
+  if (resolved?.blocked) throw error('当前出资已停用、被撤销或尚未配置');
+  const source = resolved || (p.funding[key]?.mode === 'platform' && p.funding[key]?.enabled === true ? { id:'platform',version:1,mode:'platform',endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels || [],imageTokensPerImage:p.imageTokensPerImage,scopeAuthorized:false } : null);
+  const [kind,id] = String(key).split(':'), denied = config.deny?.[kind === 'group' ? 'groups' : 'private'];
+  if (!source || !chatKey(key) || Array.isArray(denied) && denied.map(String).includes(id) || !allowed(config,key) && source.scopeAuthorized !== true) throw error('聊天或出资未获明确授权');
+  if (!['platform','trial','byok'].includes(source.mode) || typeof source.id !== 'string' || !Number.isSafeInteger(source.version) || source.version < 1 || typeof source.model !== 'string'
+    || !plain(source.prices) || !['inputCnyPerMillion','cacheHitCnyPerMillion','outputCnyPerMillion'].every(k => money(source.prices[k])) || source.prices.reasoningIncluded !== true) throw error('出资没有完整报价');
+  return { ...source,endpoint:endpoint(source.endpoint) };
+}
+export function resolvePaidConversationApi(baseApi, { explicitOverride = false } = {}) {
+  const context = currentConversationContext();
+  if (!context || !fundingServices) return baseApi;
+  const source = sourceFor(getConfig(),context.conversationKey);
+  if (source.id !== context.fundingRef?.id || source.version !== context.fundingRef?.version) throw error('出资配置已变更');
+  if (explicitOverride && (endpoint(baseApi.baseUrl) !== source.endpoint || baseApi.model !== source.model)) throw error('备选端点或模型未获得此出资授权');
+  return { ...baseApi,baseUrl:source.endpoint,model:source.model,apiKey:source.mode === 'byok' ? source.apiKey : baseApi.apiKey };
+}
+export function capturePaidAuthority(key) {
+  const cfg=getConfig();if(!Object.hasOwn(cfg,'productionBudget')&&!fundingServices&&process.env.QQ_AGENT_REQUIRE_BUDGET!=='1')return null;
+  const source=sourceFor(cfg,key),ctx=currentConversationContext();
+  if(ctx&&(ctx.conversationKey!==key||ctx.fundingRef.id!==source.id||ctx.fundingRef.version!==source.version))throw error('出资权限已变化');
+  return {id:source.id,version:source.version};
+}
+export function assertPaidAuthority(key,token) {
+  if(!token)return;
+  const source=sourceFor(getConfig(),key);if(source.id!==token.id||source.version!==token.version)throw error('出资权限已撤销或变更');
+}
 function endpoint(value) {
   if (typeof value !== 'string') throw error('付费端点未明确配置');
   let u; try { u = new URL(value); } catch { throw error('付费端点无效'); }
@@ -51,10 +89,11 @@ function allowed(config, key) {
   return Array.isArray(allow) && allow.map(String).includes(id) && !(Array.isArray(deny) && deny.map(String).includes(id));
 }
 function authorize(config, context) {
-  const p = policy(config), key = context?.conversationKey;
-  if (!context || context.botId !== 'primary' || !allowed(config, key) || context.fundingRef?.id !== 'platform'
-    || p.funding[key]?.mode !== 'platform' || p.funding[key]?.enabled !== true) throw error('该群或私聊没有明确的平台出资授权；未启用 BYOK 或普通体验额度');
-  return p;
+  const p = effectivePolicy(config), key = context?.conversationKey;
+  if (!context || context.botId !== 'primary') throw error('缺少可信聊天上下文');
+  const source = sourceFor(config,key);
+  if (context.fundingRef?.id !== source.id || context.fundingRef?.version !== source.version) throw error('出资授权已变化');
+  return { ...p,endpoint:source.endpoint,model:source.model,prices:source.prices,verifiedResponseModels:source.responseModels || [],imageTokensPerImage:source.imageTokensPerImage,source };
 }
 
 export function createPaidCallStorage(file) {
@@ -135,6 +174,21 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
   if (!storage || typeof config !== 'function') throw error('费用保护缺少依赖');
   let seedAt = null;
   const budget = createConversationBudget({ storage, file: 'conversation-budget', botId: 'primary', now: () => seedAt ?? now() });
+  let trialBudget=null;
+  function trial(p) {
+    if(!p.trial||!money(p.trial.dailyLimitCny)||!plain(p.trial.initialSpent))throw error('平台体验总额保护未配置');
+    if(!trialBudget)trialBudget=createConversationBudget({storage,file:'platform-trial-budget',botId:'platform_trial',now:()=>seedAt??now()});
+    const raw=storage.readText('platform-trial-initial-marker'),seedHash=hash(p.trial.initialSpent);
+    if(raw!==null){if(JSON.parse(raw).seedHash!==seedHash)throw error('体验初始余额已变更','PAID_LEDGER_UNAVAILABLE');}
+    else {
+      if(trialBudget.records().length)throw error('体验总账缺少初始化标记','PAID_LEDGER_UNAVAILABLE');
+      trialBudget.update({configVersion:trialBudget.config().configVersion,enabled:false});
+      try{for(const [date,amount]of Object.entries(p.trial.initialSpent)){if(!isDate(date)||!money(amount))throw error('体验初始费用无效');if(!amount)continue;seedAt=Date.parse(date+'T04:00:00Z');const hold=trialBudget.reserve('private:1',{operationId:'trial-seed:'+date,estimatedMaxCost:amount,quote:{currency:'CNY',complete:true}});if(!hold.allowed||!trialBudget.dispatch(hold.id).mayDispatch)throw error('体验初始费用入账失败');trialBudget.settle(hold.id,{amount,currency:'CNY'});}}finally{seedAt=null;}
+      storage.writeText('platform-trial-initial-marker',JSON.stringify({version:1,seedHash}),null);
+    }
+    const cfg=trialBudget.config();if(!cfg.enabled||cfg.defaultDailyLimitCny!==p.trial.dailyLimitCny)trialBudget.update({configVersion:cfg.configVersion,enabled:true,defaultDailyLimitCny:p.trial.dailyLimitCny});
+    return trialBudget;
+  }
   function sync(p) {
     const current = budget.config(), target = { enabled: true, defaultDailyLimitCny: p.defaultDailyLimitCny,
       overrides: Object.fromEntries(Object.entries(p.overrides).map(([k, v]) => [k, { enabled: true, dailyLimitCny: v }])) };
@@ -142,7 +196,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
     if (current.enabled !== true || current.defaultDailyLimitCny !== target.defaultDailyLimitCny || stable(current.overrides) !== stable(target.overrides)) budget.update({ configVersion: current.configVersion, ...target, overrides: { ...removals, ...target.overrides } });
   }
   storage.transaction(() => {
-    const p = policy(config()), original = storage.readText('initial-spent-marker'), seedHash = hash(p.initialSpent);
+    const p = effectivePolicy(config()), original = storage.readText('initial-spent-marker'), seedHash = hash(p.initialSpent);
     if (original !== null) {
       let marker; try { marker = JSON.parse(original); } catch { throw error('初始费用标记损坏', 'PAID_LEDGER_UNAVAILABLE'); }
       if (!plain(marker) || marker.version !== 1 || marker.seedHash !== seedHash) throw error('初始费用快照发生变化，不能再次覆盖已运行账本', 'PAID_LEDGER_UNAVAILABLE');
@@ -163,20 +217,27 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
     sync(p);
   });
   return {
-    status(key) { return storage.transaction(() => { sync(policy(config())); return budget.status(key); }); },
+    status(key) { return storage.transaction(() => { sync(effectivePolicy(config())); return budget.status(key); }); },
     records: filters => budget.records(filters),
+    trialStatus(){return storage.transaction(()=>trial(effectivePolicy(config())).status('private:1'));},
     prepare({ api, body, purpose = 'chat', direct = true, platformCredential, operationId = crypto.randomUUID() }) {
       return storage.transaction(() => {
         const cfg = config(), context = currentConversationContext(), p = authorize(cfg, context); sync(p);
-        if (endpoint(api.baseUrl) !== p.endpoint || api.model !== p.model || !platformCredential || api.apiKey !== platformCredential) throw error('当前端点、模型或凭据不在平台付费授权内');
+        const credential = p.source.mode === 'byok' ? p.source.apiKey : platformCredential;
+        if (endpoint(api.baseUrl) !== p.endpoint || api.model !== p.model || !credential || api.apiKey !== credential) throw error('当前端点、模型或凭据不在出资授权内');
         if (!['chat', 'memory', 'proactive'].includes(purpose)) throw error('未知付费调用用途');
-        const current = budget.status(context.conversationKey), first = constrainedBody(body, p, false);
-        const degraded = current.action !== 'normal' || current.enabled && current.spentCny + current.reservedCny + first.amount >= current.dailyLimitCny * 0.8;
+        const current = budget.status(context.conversationKey), first = constrainedBody(body, p, false), globalTrial=p.source.mode==='trial'?trial(p):null,globalStatus=globalTrial?.status('private:1');
+        const degraded = current.action !== 'normal' || current.enabled && current.spentCny + current.reservedCny + first.amount >= current.dailyLimitCny * 0.8 || globalStatus && globalStatus.spentCny+globalStatus.reservedCny+first.amount>=globalStatus.dailyLimitCny*.8;
         if (degraded && (purpose !== 'chat' || !direct)) throw error('预算达到80%，已暂停主动参与和后台记忆整理');
         const quote = degraded ? constrainedBody(body, p, true) : first;
         const hold = budget.reserve(context.conversationKey, { operationId, estimatedMaxCost: quote.amount, quote: { currency: 'CNY', complete: true } });
         if (!hold.allowed) throw error(hold.reason || '今日会话预算不足');
-        return { id: hold.id, key: context.conversationKey, requestId: context.requestId, model: p.model, endpoint: p.endpoint,
+        const trialHold=globalTrial?.reserve('private:1',{operationId:'trial:'+operationId,estimatedMaxCost:quote.amount,quote:{currency:'CNY',complete:true}});
+        if(trialHold&&!trialHold.allowed)throw error('平台今日体验总额不足');
+        const raw = storage.readText('call-attribution'), attribution = raw === null ? {} : JSON.parse(raw);
+        attribution[hold.id] = { key:context.conversationKey,mode:p.source.mode,ownerId:p.source.ownerId || null,credentialRef:p.source.credentialRef || null,model:p.model };
+        storage.writeText('call-attribution',JSON.stringify(attribution),raw);
+        return { id: hold.id,trialHoldId:trialHold?.id||null,key: context.conversationKey, requestId: context.requestId, model: p.model, endpoint: p.endpoint, sourceId:p.source.id,sourceVersion:p.source.version,
           prices: { ...p.prices }, responseModels: p.verifiedResponseModels || [], body: quote.body, degraded, purpose,
           configFingerprint: fundingFingerprint(p, context.conversationKey) };
       });
@@ -185,7 +246,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
       return storage.transaction(() => {
         const p = authorize(config(), currentConversationContext()); sync(p);
         if (currentConversationContext().conversationKey !== token.key || currentConversationContext().requestId !== token.requestId
-          || token.configFingerprint !== fundingFingerprint(p, token.key)) throw error('付费来源或请求配置已变化');
+          || token.sourceId !== p.source.id || token.sourceVersion !== p.source.version || token.configFingerprint !== fundingFingerprint(p, token.key)) throw error('付费来源或请求配置已变化');
         const current = budget.status(token.key);
         if (current.action !== 'normal' && !token.degraded) throw error('费用已达到节流阈值，请按新限制重新发起请求');
         const raw = storage.readText('interactive-cooldown'), prior = raw === null ? {} : JSON.parse(raw);
@@ -193,6 +254,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         if (token.degraded && prior[token.key]?.requestId !== token.requestId && now() - (prior[token.key]?.at ?? -Infinity) < 60_000) throw error('预算节流中，请间隔至少60秒再发起回复');
         if (current.action !== 'normal' && token.purpose !== 'chat') throw error('预算已达到80%，后台调用暂停');
         if (!budget.dispatch(token.id).mayDispatch) throw error('剩余额度或配置已变化，未发送调用暂停');
+        if(token.trialHoldId&&!trial(p).dispatch(token.trialHoldId).mayDispatch)throw error('平台体验总额已变化');
         if (token.purpose === 'chat' && prior[token.key]?.requestId !== token.requestId) {
           Object.defineProperty(prior, token.key, { value: { requestId: token.requestId, at: now() }, enumerable: true, configurable: true, writable: true });
           storage.writeText('interactive-cooldown', JSON.stringify(prior), raw);
@@ -203,10 +265,11 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
       let raw; try { raw = JSON.parse(text); } catch { return this.unknown(token, 'invalid_json'); }
       const amount = usageCost(raw, token);
       if (amount === null) return this.unknown(token, 'missing_usage');
-      return budget.settle(token.id, { amount, currency: 'CNY' });
+      return storage.transaction(()=>{const value=budget.settle(token.id,{amount,currency:'CNY'});if(token.trialHoldId)trial(effectivePolicy(config())).settle(token.trialHoldId,{amount,currency:'CNY'});return value;});
     },
-    unknown(token, reason = 'network_error') { return budget.markUnknown(token.id, { reason }); },
-    release(token) { return budget.release(token.id); },
+    unknown(token, reason = 'network_error') { return storage.transaction(()=>{const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});return value;}); },
+    release(token) { return storage.transaction(()=>{const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);return value;}); },
+    attributions() { const raw = storage.readText('call-attribution'); return raw === null ? {} : JSON.parse(raw); },
   };
 }
 
@@ -222,7 +285,7 @@ export function productionPaidCallGuard() {
 }
 export function closeProductionPaidCallGuard() { if (production) production.storage.close(); production = null; }
 
-const fundedKeys = (cfg, p) => Object.keys(p.funding).filter(key => allowed(cfg, key) && p.funding[key].mode === 'platform' && p.funding[key].enabled === true).sort();
+const fundedKeys = (cfg, p) => [...new Set([...Object.keys(p.funding),...(fundingServices?.policy()?.scopeKeys||[])])].filter(key => {try{return Boolean(sourceFor(cfg,key));}catch{return false;}}).sort();
 const limitsVersion = (cfg, p) => hash({ defaultDailyLimitCny: p.defaultDailyLimitCny, overrides: p.overrides, scopes: fundedKeys(cfg, p) });
 /** Management-only projection: no credentials, endpoints, price table or initial balances. */
 export function productionBudgetOverview() {
@@ -255,6 +318,7 @@ export function runWithPaidConversation(key, work) {
   const config = getConfig(); if (!Object.hasOwn(config, 'productionBudget') && !production && process.env.QQ_AGENT_REQUIRE_BUDGET !== '1') return work();
   const existing = currentConversationContext();
   if (existing) { if (existing.conversationKey !== key) throw error('会话物理归属发生变化'); authorize(config, existing); return work(); }
-  const context = { botId: 'primary', conversationKey: key, actorId: 'server', fundingRef: { id: 'platform', version: 1 }, personaRef: { id: 'server-selected', version: 1 } };
+  const source = sourceFor(config,key);
+  const context = { botId: 'primary', conversationKey: key, actorId: 'server', fundingRef: { id: source.id, version: source.version }, personaRef: { id: 'server-selected', version: 1 } };
   authorize(config, context); return runWithConversationContext(context, work);
 }

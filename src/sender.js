@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+import { capturePaidAuthority, assertPaidAuthority } from './paid-call-guard.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -41,10 +42,12 @@ export function toFileUri(input) {
 }
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null, log = null }) {
+  constructor({ onebot, store, onSent = null, log = null, canSend = () => true }) {
+    if (typeof canSend !== 'function') throw new TypeError('canSend must be a synchronous function');
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
+    this.canSend = canSend;
     // 回退/降级这类"行为变了但没报错"的事必须留痕，否则排查时看不到曾经降级过
     this.log = typeof log === 'function' ? log : null;
     this.chains = new Map();      // chatKey -> enqueue fn
@@ -70,13 +73,27 @@ export class SendQueue {
   }
 
   #capture(chatKey) {
-    const selection = this.store.captureArchive?.(chatKey) ?? null;
+    this.#assertCanSend(chatKey);
+    const paidAuthority = capturePaidAuthority(chatKey);
+    const captured = this.store.captureArchive?.(chatKey);
+    const selection = captured ? {...captured} : paidAuthority ? {archiveId:null,selectionVersion:0} : null;
+    if(selection&&paidAuthority)Object.defineProperty(selection,'paidAuthority',{value:paidAuthority});
     this.store.assertArchiveCurrent?.(chatKey, selection);
     return selection;
   }
 
   #guard(chatKey, selection) {
+    this.#assertCanSend(chatKey);
     this.store.assertArchiveCurrent?.(chatKey, selection);
+    assertPaidAuthority(chatKey,selection?.paidAuthority);
+  }
+
+  #assertCanSend(chatKey) {
+    // Availability may change while a queued message waits (for example, the
+    // bot leaves a group). The application supplies the authoritative check.
+    if (this.canSend(chatKey) !== true) {
+      throw Object.assign(new Error('CHAT_SEND_DISABLED'), { code: 'CHAT_SEND_DISABLED' });
+    }
   }
 
   #record(chatKey, entry, selection) {
@@ -264,6 +281,7 @@ export class SendQueue {
           // file:/// 解析差异都可能拒收本地形态，而 base64 是最通用的兜底
           //（sendImage 早有同款回退；这里曾经直接 throw，本地收藏因此"永远发不出去"）。
           const { localStickerPath } = await import('./sticker-manager.js');
+          this.#guard(chatKey, selection);
           const p = localStickerPath(primary);
           let buf = null;
           try { buf = p ? fs.readFileSync(p) : null; } catch { buf = null; }
@@ -280,6 +298,7 @@ export class SendQueue {
           const fileKey = sticker.md5 || sticker.resId || sticker.id || '';
           this.#guard(chatKey, selection);
           const ret = await this.onebot.call('get_image', { file: fileKey });
+          this.#guard(chatKey, selection);
           const cached = ret?.file || ret?.filename || '';
           if (cached) {
             this.log?.(`[sender] 表情直链发送失败（${firstError?.message ?? firstError}），改用协议端缓存重试`);
@@ -291,7 +310,9 @@ export class SendQueue {
         if (!data) {
           this.#guard(chatKey, selection);
           const { safeFetchBinary } = await import('./safe-fetch.js');
+          this.#guard(chatKey, selection);
           const { buffer } = await safeFetchBinary(primary, 15 * 1024 * 1024);
+          this.#guard(chatKey, selection);
           if (!buffer?.length) throw firstError;
           this.log?.(`[sender] 表情直链发送失败，已下载 ${Math.round(buffer.length / 1024)}KB 转 base64 发送`);
           data = await sendVia(`base64://${buffer.toString('base64')}`);

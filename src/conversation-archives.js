@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-const APP_ID = 0x51414348, BUNDLE_VERSION = 1, DB_VERSION = 2, MAX_BYTES = 64 * 1024 * 1024;
+const APP_ID = 0x51414348, BUNDLE_VERSION = 1, DB_VERSION = 3, MAX_BYTES = 64 * 1024 * 1024;
 const CONTINUATIONS = ['ready', 'blocked', 'missing', 'deleted-persona'];
 const TABLES = ['archive_sources', 'archive_personas', 'conversation_archives', 'archive_selections', 'archive_imports'];
 const problem = (message, statusCode = 400) => Object.assign(Error(message), { statusCode });
@@ -91,7 +91,8 @@ const mapKey = (...parts) => JSON.stringify(parts);
 const schema = `
 CREATE TABLE archive_sources (bot_id TEXT NOT NULL, id TEXT NOT NULL, coverage_json TEXT NOT NULL, PRIMARY KEY(bot_id,id)) STRICT;
 CREATE TABLE archive_personas (bot_id TEXT NOT NULL, id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, version INTEGER NOT NULL CHECK(version>0), history_json TEXT NOT NULL, PRIMARY KEY(bot_id,id), FOREIGN KEY(bot_id,source_id) REFERENCES archive_sources(bot_id,id)) STRICT;
-CREATE TABLE conversation_archives (bot_id TEXT NOT NULL, id TEXT NOT NULL, source_id TEXT NOT NULL, chat_key TEXT NOT NULL, persona_id TEXT NOT NULL, continuation TEXT NOT NULL CHECK(continuation IN ('ready','blocked','missing','deleted-persona')), legacy_session_id TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), chat_json TEXT NOT NULL, transcript_json TEXT NOT NULL, PRIMARY KEY(bot_id,id), UNIQUE(bot_id,id,chat_key), FOREIGN KEY(bot_id,source_id) REFERENCES archive_sources(bot_id,id), FOREIGN KEY(bot_id,persona_id) REFERENCES archive_personas(bot_id,id)) STRICT;
+CREATE TABLE conversation_archives (bot_id TEXT NOT NULL, id TEXT NOT NULL, source_id TEXT NOT NULL, chat_key TEXT NOT NULL, persona_id TEXT NOT NULL, continuation TEXT NOT NULL CHECK(continuation IN ('ready','blocked','missing','deleted-persona')), legacy_session_id TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), chat_json TEXT NOT NULL, transcript_json TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count>=0), transcript_count INTEGER NOT NULL DEFAULT 0 CHECK(transcript_count>=0), PRIMARY KEY(bot_id,id), UNIQUE(bot_id,id,chat_key), FOREIGN KEY(bot_id,source_id) REFERENCES archive_sources(bot_id,id), FOREIGN KEY(bot_id,persona_id) REFERENCES archive_personas(bot_id,id)) STRICT;
+CREATE INDEX archive_chat_lookup ON conversation_archives(bot_id,chat_key,id);
 CREATE TABLE archive_selections (bot_id TEXT NOT NULL, chat_key TEXT NOT NULL, archive_id TEXT NOT NULL, version INTEGER NOT NULL CHECK(version>0), PRIMARY KEY(bot_id,chat_key), FOREIGN KEY(bot_id,archive_id,chat_key) REFERENCES conversation_archives(bot_id,id,chat_key)) STRICT;
 CREATE TABLE archive_imports (bot_id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('persona','archive','selection')), item_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(bot_id,source_id,kind,item_id), FOREIGN KEY(bot_id,source_id) REFERENCES archive_sources(bot_id,id)) STRICT;
 `;
@@ -103,7 +104,7 @@ export class ConversationArchives {
     this.file = path.resolve(file); this.botId = botId; this.db = null; this.readDb = null; this.closed = false;
   }
   _schema(db) {
-    if (db.prepare('PRAGMA application_id').get().application_id !== APP_ID || db.prepare('PRAGMA user_version').get().user_version !== DB_VERSION) throw problem('SQLite 档案身份或版本不受支持，拒绝改写', 503);
+    if (db.prepare('PRAGMA application_id').get().application_id !== APP_ID || ![2, DB_VERSION].includes(db.prepare('PRAGMA user_version').get().user_version)) throw problem('SQLite 档案身份或版本不受支持，拒绝改写', 503);
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name).sort();
     if (JSON.stringify(names) !== JSON.stringify([...TABLES].sort()) || db.prepare('PRAGMA quick_check').get().quick_check !== 'ok' || db.prepare('PRAGMA foreign_key_check').all().length) throw problem('SQLite 档案结构损坏，拒绝改写', 503);
   }
@@ -121,6 +122,13 @@ export class ConversationArchives {
     }
     const db = new DatabaseSync(this.file, { readOnly: !write }); db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=10000');
     try { this._schema(db); } catch (error) { db.close(); throw error; }
+    if (write && db.prepare('PRAGMA user_version').get().user_version === 2) {
+      try {
+        // Validate the complete legacy source once before its atomic metadata migration.
+        this._load(db);
+        db.exec('BEGIN IMMEDIATE; ALTER TABLE conversation_archives ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count>=0); ALTER TABLE conversation_archives ADD COLUMN transcript_count INTEGER NOT NULL DEFAULT 0 CHECK(transcript_count>=0); UPDATE conversation_archives SET message_count=json_array_length(chat_json,\'$.messages\'),transcript_count=json_array_length(transcript_json); CREATE INDEX archive_chat_lookup ON conversation_archives(bot_id,chat_key,id); PRAGMA user_version=3; COMMIT;');
+      } catch (error) { try { db.exec('ROLLBACK'); } catch {} db.close(); throw error; }
+    }
     if (write) this.db = db; else this.readDb = db;
     return { db, temporary: false };
   }
@@ -166,9 +174,21 @@ export class ConversationArchives {
     if (!db) return work(null);
     try {
       db.exec('BEGIN');
-      if (db.prepare('PRAGMA application_id').get().application_id !== APP_ID || db.prepare('PRAGMA user_version').get().user_version !== DB_VERSION) throw problem('SQLite 档案身份或版本不受支持', 503);
+      if (db.prepare('PRAGMA application_id').get().application_id !== APP_ID || ![2,DB_VERSION].includes(db.prepare('PRAGMA user_version').get().user_version)) throw problem('SQLite 档案身份或版本不受支持', 503);
       const result = work(db); db.exec('COMMIT'); return result;
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+  }
+  upgradeSchema() { this._connection(true); return DB_VERSION; }
+  _fastWrite(work) {
+    const { db } = this._connection(true);
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const version = db.prepare('PRAGMA data_version').get().data_version;
+      // Our own writes are validated at their boundary. External changes invalidate
+      // the one-time complete validation, including corrupt inert source payloads.
+      if (this.validatedWriteVersion !== version) { this._load(db); this.validatedWriteVersion = version; }
+      const result = work(db); db.exec('COMMIT'); return result;
+    } catch (error) { this.validatedWriteVersion = undefined; try { db.exec('ROLLBACK'); } catch {} throw error; }
   }
   _active(state, chatKey) {
     const selected = state.selections.get(chatKey); if (!selected) return null;
@@ -193,7 +213,7 @@ export class ConversationArchives {
     for (const value of bundle.personas) {
       const previous = imported('persona', value.id), existing = state.personas.get(value.id), hash = fingerprint(value);
       if (previous && previous.fingerprint !== hash) throw problem('同来源人设已被改写，拒绝覆盖', 409);
-      if (existing) { const { sourceId: _source, ...current } = existing; if (fingerprint(current) !== hash) throw problem('人设 ID 已存在且内容冲突', 409); result.unchanged++; }
+      if (existing) { const { sourceId: _source, ...current } = existing; if ((!previous || previous.fingerprint !== hash) && fingerprint(current) !== hash) throw problem('人设 ID 已存在且内容冲突', 409); result.unchanged++; }
       else { const row = { ...clone(value), sourceId }; state.personas.set(value.id, row); tasks.push({ type: 'persona', row }); result.personasAdded++; }
       if (!previous) remember('persona', value.id, value);
     }
@@ -248,23 +268,64 @@ export class ConversationArchives {
         const row = task.row;
         if (task.type === 'source') db.prepare('INSERT INTO archive_sources VALUES(?,?,?) ON CONFLICT(bot_id,id) DO UPDATE SET coverage_json=excluded.coverage_json').run(this.botId, task.sourceId, stable(task.coverage));
         else if (task.type === 'persona') db.prepare('INSERT INTO archive_personas VALUES(?,?,?,?,?,?,?)').run(this.botId, row.id, row.sourceId, row.name, row.content, row.version, stable(row.history));
-        else if (task.type === 'archive') db.prepare('INSERT INTO conversation_archives VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(this.botId, row.id, row.sourceId, row.chatKey, row.personaId, row.continuation, row.legacySessionId, row.createdAt, row.lastUsedAt, row.revision, stable(row.chat), stable(row.transcript));
-        else if (task.type === 'archive-update') db.prepare('UPDATE conversation_archives SET last_used_at=?,revision=?,chat_json=?,transcript_json=? WHERE bot_id=? AND id=?').run(row.lastUsedAt, row.revision, stable(row.chat), stable(row.transcript), this.botId, row.id);
+        else if (task.type === 'archive') db.prepare('INSERT INTO conversation_archives VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(this.botId, row.id, row.sourceId, row.chatKey, row.personaId, row.continuation, row.legacySessionId, row.createdAt, row.lastUsedAt, row.revision, stable(row.chat), stable(row.transcript), row.chat.messages.length, row.transcript.length);
+        else if (task.type === 'archive-update') db.prepare('UPDATE conversation_archives SET last_used_at=?,revision=?,chat_json=?,transcript_json=?,message_count=?,transcript_count=? WHERE bot_id=? AND id=?').run(row.lastUsedAt, row.revision, stable(row.chat), stable(row.transcript), row.chat.messages.length, row.transcript.length, this.botId, row.id);
         else if (task.type === 'selection') db.prepare('INSERT INTO archive_selections VALUES(?,?,?,?)').run(this.botId, row.chatKey, row.archiveId, row.version);
         else if (task.type === 'import') db.prepare('INSERT INTO archive_imports VALUES(?,?,?,?,?,?) ON CONFLICT(bot_id,source_id,kind,item_id) DO UPDATE SET fingerprint=excluded.fingerprint,payload_json=excluded.payload_json').run(this.botId, row.sourceId, row.kind, row.id, row.fingerprint, stable(row.payload));
       }
       return { ...result, dryRun };
     });
   }
-  list(chatKey) {
+  list(chatKey, { limit = 10000, offset = 0 } = {}) {
     if (chatKey !== undefined && !key(chatKey)) throw problem('会话标识无效');
-    return this._transaction(false, state => [...state.archives.values()].filter(row => chatKey === undefined || row.chatKey === chatKey).map(row => ({
-      id: row.id, archiveId: row.id, sourceId: row.sourceId, chatKey: row.chatKey, personaId: row.personaId, continuation: row.continuation, legacySessionId: row.legacySessionId,
-      createdAt: row.createdAt, lastUsedAt: row.lastUsedAt, revision: row.revision, persona: { id: row.personaId, name: state.personas.get(row.personaId).name, version: state.personas.get(row.personaId).version }, messageCount: row.chat.messages.length, transcriptCount: row.transcript.length,
-      selected: state.selections.get(row.chatKey)?.archiveId === row.id, selectionVersion: state.selections.get(row.chatKey)?.version ?? 0,
-    })));
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000 || !Number.isSafeInteger(offset) || offset < 0) throw problem('档案分页无效');
+    return this._fastRead(db => {
+      if (!db) return [];
+      const legacy = db.prepare('PRAGMA user_version').get().user_version === 2;
+      const counts = legacy ? "json_array_length(a.chat_json,'$.messages') message_count,json_array_length(a.transcript_json) transcript_count" : 'a.message_count,a.transcript_count';
+      const rows = db.prepare(`SELECT a.id,a.source_id,a.chat_key,a.persona_id,a.continuation,a.legacy_session_id,a.created_at,a.last_used_at,a.revision,${counts},p.name,p.version,s.archive_id selected_id,s.version selection_version FROM conversation_archives a JOIN archive_personas p ON p.bot_id=a.bot_id AND p.id=a.persona_id LEFT JOIN archive_selections s ON s.bot_id=a.bot_id AND s.chat_key=a.chat_key WHERE a.bot_id=?${chatKey === undefined ? '' : ' AND a.chat_key=?'} ORDER BY a.id LIMIT ? OFFSET ?`).all(...[this.botId, ...(chatKey === undefined ? [] : [chatKey]), limit, offset]);
+      return rows.map(row => ({ id: row.id, archiveId: row.id, sourceId: row.source_id, chatKey: row.chat_key, personaId: row.persona_id, continuation: row.continuation, legacySessionId: row.legacy_session_id, createdAt: row.created_at, lastUsedAt: row.last_used_at, revision: row.revision, persona: { id: row.persona_id, name: row.name, version: row.version }, messageCount: row.message_count, transcriptCount: row.transcript_count, selected: row.selected_id === row.id, selectionVersion: row.selection_version ?? 0 }));
+    });
   }
-  personas() { return this._transaction(false, state => [...state.personas.values()].map(clone)); }
+  personas() { return this._fastRead(db => !db ? [] : db.prepare('SELECT * FROM archive_personas WHERE bot_id=? ORDER BY id').all(this.botId).map(row => ({ id: row.id, sourceId: row.source_id, name: row.name, content: row.content, version: row.version, history: decodedRead(row.history_json) }))); }
+  createPersona({ id: personaId = 'persona-' + crypto.randomUUID(), name, content, sourceId = 'runtime', version = 1, history = [] }) {
+    const value = persona({ id: personaId, name, content, version, history });
+    if (!id(sourceId)) throw problem('人设来源无效');
+    return this._fastWrite(db => {
+      if (db.prepare('SELECT 1 FROM archive_personas WHERE bot_id=? AND id=?').get(this.botId,personaId)) throw problem('人设已存在',409);
+      db.prepare('INSERT INTO archive_sources VALUES(?,?,?) ON CONFLICT DO NOTHING').run(this.botId,sourceId,'{"status":"runtime"}');
+      db.prepare('INSERT INTO archive_personas VALUES(?,?,?,?,?,?,?)').run(this.botId,personaId,sourceId,name,content,version,stable(history));
+      return { ...value, sourceId };
+    });
+  }
+  updatePersona({ id: personaId, expectedVersion, name, content }) {
+    if (!id(personaId) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw problem('人设版本无效');
+    return this._fastWrite(db => {
+      const row = db.prepare('SELECT * FROM archive_personas WHERE bot_id=? AND id=?').get(this.botId,personaId);
+      if (!row) throw problem('人设不存在',404);
+      if (row.version !== expectedVersion) throw problem('人设已被修改，请刷新后重试',409);
+      const history = decodedRead(row.history_json), nextName = name ?? row.name, nextContent = content ?? row.content;
+      if (nextName === row.name && nextContent === row.content) return { id:personaId,name:row.name,content:row.content,version:row.version,history };
+      history.push({ kind:'qq-agent-persona-revision', version:row.version, name:row.name, content:row.content, at:Date.now() });
+      const newId='persona-'+crypto.randomUUID();persona({ id:newId,name:nextName,content:nextContent,version:row.version+1,history });
+      db.prepare('INSERT INTO archive_personas VALUES(?,?,?,?,?,?,?)').run(this.botId,newId,row.source_id,nextName,nextContent,row.version+1,stable(history));
+      return { id:newId,name:nextName,content:nextContent,version:row.version+1,history,previousPersonaId:personaId };
+    });
+  }
+  createArchive({ chatKey, personaId, expectedSelectionVersion, archiveId = 'archive-' + crypto.randomUUID() }) {
+    if (!key(chatKey) || !id(personaId) || !id(archiveId) || !Number.isSafeInteger(expectedSelectionVersion) || expectedSelectionVersion < 0) throw problem('新档案参数或选择版本无效');
+    return this._fastWrite(db => {
+      const p = db.prepare('SELECT * FROM archive_personas WHERE bot_id=? AND id=?').get(this.botId,personaId);
+      if (!p) throw problem('人设不存在',404);
+      const selected = db.prepare('SELECT version FROM archive_selections WHERE bot_id=? AND chat_key=?').get(this.botId,chatKey);
+      if ((selected?.version ?? 0) !== expectedSelectionVersion) throw problem('当前档案已切换，请刷新后重试',409);
+      const at = Date.now(), sourceId='runtime';
+      db.prepare('INSERT INTO archive_sources VALUES(?,?,?) ON CONFLICT DO NOTHING').run(this.botId,sourceId,'{"status":"runtime"}');
+      db.prepare('INSERT INTO conversation_archives VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(this.botId,archiveId,sourceId,chatKey,personaId,'ready',null,at,at,1,stable({chatKey,nextLocalId:1,messages:[]}),'[]',0,0);
+      db.prepare('INSERT INTO archive_selections VALUES(?,?,?,?) ON CONFLICT(bot_id,chat_key) DO UPDATE SET archive_id=excluded.archive_id,version=excluded.version').run(this.botId,chatKey,archiveId,expectedSelectionVersion+1);
+      return { chatKey,sourceId,archiveId,selectionVersion:expectedSelectionVersion+1,persona:{id:personaId,name:p.name,content:p.content,version:p.version} };
+    });
+  }
   active(chatKey) {
     if (!key(chatKey)) throw problem('会话标识无效');
     return this._fastRead(db => {
@@ -277,16 +338,18 @@ export class ConversationArchives {
   }
   select(chatKey, archiveId, { expectedVersion } = {}) {
     if (!key(chatKey) || !id(archiveId) || expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0)) throw problem('档案选择或版本无效');
-    return this._transaction(true, (state, db) => {
-      const row = this._record(state, chatKey, archiveId), current = state.selections.get(chatKey);
+    return this._fastWrite(db => {
+      const row = db.prepare('SELECT id,continuation,last_used_at FROM conversation_archives WHERE bot_id=? AND chat_key=? AND id=?').get(this.botId,chatKey,archiveId), current = db.prepare('SELECT archive_id archiveId,version FROM archive_selections WHERE bot_id=? AND chat_key=?').get(this.botId,chatKey);
+      if (!row) throw problem('该会话没有指定档案',404);
       if (row.continuation !== 'ready') throw problem('该档案仅供查阅，不能继续聊天', 409);
       if (expectedVersion !== undefined && expectedVersion !== (current?.version ?? 0)) throw problem('当前档案已被其他操作切换', 409);
       if (current?.archiveId !== row.id) {
         const version = (current?.version ?? 0) + 1; if (!Number.isSafeInteger(version)) throw problem('选择版本超出范围', 503);
         db.prepare('INSERT INTO archive_selections VALUES(?,?,?,?) ON CONFLICT(bot_id,chat_key) DO UPDATE SET archive_id=excluded.archive_id,version=excluded.version').run(this.botId, chatKey, row.id, version);
-        db.prepare('UPDATE conversation_archives SET last_used_at=? WHERE bot_id=? AND id=?').run(Math.max(Date.now(), row.lastUsedAt), this.botId, row.id); state.selections.set(chatKey, { archiveId: row.id, version });
+        db.prepare('UPDATE conversation_archives SET last_used_at=? WHERE bot_id=? AND id=?').run(Math.max(Date.now(), row.last_used_at), this.botId, row.id);
       }
-      return this._active(state, chatKey);
+      const p = db.prepare('SELECT p.id,p.name,p.content,p.version,a.source_id FROM archive_personas p JOIN conversation_archives a ON a.bot_id=p.bot_id AND a.persona_id=p.id WHERE a.bot_id=? AND a.id=?').get(this.botId,archiveId);
+      return { chatKey, sourceId: p.source_id, archiveId, selectionVersion: current?.archiveId === archiveId ? current.version : (current?.version ?? 0)+1, persona: { id:p.id,name:p.name,content:p.content,version:p.version } };
     });
   }
   readChat(chatKey, archiveId) {
@@ -311,11 +374,11 @@ export class ConversationArchives {
     chatState(value);
     const revision = Object.getOwnPropertyDescriptor(value, 'revision')?.value, archiveId = Object.getOwnPropertyDescriptor(value, 'archiveId')?.value;
     if (Object.getOwnPropertyDescriptor(value, 'botId')?.value !== this.botId || !Number.isSafeInteger(revision) || revision < 1 || !id(archiveId)) throw problem('写入档案必须携带原始读取版本', 409);
-    return this._transaction(true, (state, db) => {
-      const row = this._record(state, value.chatKey, archiveId); if (row.continuation !== 'ready') throw problem('该档案仅供查阅，不能继续聊天', 409);
+    return this._fastWrite(db => {
+      const row = db.prepare('SELECT revision,continuation FROM conversation_archives WHERE bot_id=? AND chat_key=? AND id=?').get(this.botId,value.chatKey,archiveId); if(!row)throw problem('该会话没有指定档案',404); if (row.continuation !== 'ready') throw problem('该档案仅供查阅，不能继续聊天', 409);
       if (row.revision !== revision) throw problem('消息档案已被其他操作更新，请重新读取', 409);
       const next = revision + 1; if (!Number.isSafeInteger(next)) throw problem('消息版本超出范围', 503);
-      const changed = db.prepare('UPDATE conversation_archives SET revision=?,chat_json=? WHERE bot_id=? AND id=? AND revision=?').run(next, stable(value), this.botId, archiveId, revision);
+      const changed = db.prepare('UPDATE conversation_archives SET revision=?,chat_json=?,message_count=? WHERE bot_id=? AND id=? AND revision=?').run(next, stable(value), value.messages.length, this.botId, archiveId, revision);
       if (changed.changes !== 1) throw problem('消息版本冲突，拒绝覆盖', 409);
       value.revision = next; return value;
     });
@@ -335,6 +398,6 @@ export class ConversationArchives {
       const value=decodedRead(row.transcript_json);if(!Array.isArray(value))throw problem('历史原文格式损坏',503);return value;
     });
   }
-  listChats() { return this._transaction(false, state => [...new Set([...state.archives.values()].map(row => row.chatKey))].sort()); }
+  listChats() { return this._fastRead(db => !db ? [] : db.prepare('SELECT DISTINCT chat_key FROM conversation_archives WHERE bot_id=? ORDER BY chat_key').all(this.botId).map(row => row.chat_key)); }
   close() { if (this.db) this.db.close(); if(this.readDb)this.readDb.close(); this.db = null; this.readDb = null; this.closed = true; }
 }

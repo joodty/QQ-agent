@@ -764,7 +764,10 @@ refs:
   const sessRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions`)).json();
   assert.ok(sessRes.sessions.length >= 8, `会话列表有记录（${sessRes.sessions.length}）`);
   const oneSession = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions/${sessRes.sessions[0].id}`)).json();
-  assert.ok(oneSession.messages && oneSession.systemPrompt);
+  assert.ok(oneSession.messages && oneSession.rawAvailable);
+  assert.equal(oneSession.systemPrompt, undefined, '默认详情省略大型提示词');
+  const rawSession = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions/${sessRes.sessions[0].id}/raw`)).json();
+  assert.ok(rawSession.messages && rawSession.systemPrompt, '显式原始 JSON 保留完整提示词');
   const chatsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/chats`)).json();
   assert.ok(chatsRes.chats.some((c) => c.key === 'group:456'));
   const uiRes = await fetch(`http://127.0.0.1:${cfg.server.port}/`);

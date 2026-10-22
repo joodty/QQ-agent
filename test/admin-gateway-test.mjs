@@ -7,14 +7,15 @@ const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', ()
 const close = server => new Promise(resolve => { server.closeAllConnections?.(); server.close(resolve); });
 const publicOrigin = 'https://console.example.test:8445';
 const consoleToken = 'fixture-console-key-for-testing-only';
-test('private admin gateway preserves original authentication and keeps the new console isolated', async t => {
+test('standalone gateway preserves account authentication and keeps native console access isolated', async t => {
   const state = { role: 'admin', authenticated: true, authFailure: false, authCalls: [], targetCalls: [] };
-  const auth = http.createServer((req, res) => {
-    state.authCalls.push({ url: req.url, headers: req.headers });
-    res.writeHead(state.authFailure ? 503 : 200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, authenticated: state.authenticated && req.headers.cookie === 'qq_console_session=fixture-cookie',
-      user: { id: 'fixture-user', role: state.role, disabled: false } }));
-  });
+  const accounts = {
+    authenticate(cookie) {
+      state.authCalls.push({ cookie });
+      if (state.authFailure) throw Object.assign(new Error('Fixture storage unavailable'), { statusCode: 503 });
+      return state.authenticated && cookie === 'qq_console_session=fixture-cookie' ? { id: 'fixture-user', role: state.role, disabled: false } : null;
+    }, handleHttp: async () => false
+  };
   const target = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
@@ -30,11 +31,11 @@ test('private admin gateway preserves original authentication and keeps the new 
       res.end(JSON.stringify({ ok: true, method: req.method }));
     });
   });
-  const authPort = await listen(auth), targetPort = await listen(target);
-  const gateway = createAdminGateway({ publicOrigin, authOrigin: `http://127.0.0.1:${authPort}`,
+  const targetPort = await listen(target);
+  const gateway = createAdminGateway({ publicOrigin, platformAuth: accounts,
     targetOrigin: `http://127.0.0.1:${targetPort}`, consoleToken, sseRecheckMs: 30, maxBodyBytes: 1024 });
   const port = await gateway.listen(0);
-  t.after(async () => { await gateway.close(); await Promise.all([close(auth), close(target)]); });
+  t.after(async () => { await gateway.close(); await close(target); });
   const request = (url = '/api/status', { method = 'GET', cookie = 'qq_console_session=fixture-cookie', headers = {}, body } = {}) => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: url, method, headers: {
       host: new URL(publicOrigin).host, ...(cookie ? { cookie } : {}),
@@ -56,26 +57,25 @@ test('private admin gateway preserves original authentication and keeps the new 
     assert.throws(() => createAdminGateway({ publicOrigin, consoleToken: 'short' }));
   });
   await t.test('anonymous requests, including static assets, never reach the new service', async () => {
-    assert.equal((await request('/', { cookie: null })).status, 401);
+    assert.equal((await request('/console.html', { cookie: null })).status, 401);
     assert.equal((await request('/app.js', { cookie: null })).status, 401);
     assert.equal(state.targetCalls.length, 0);
   });
-  await t.test('ordinary accounts cannot access either UI or API', async () => {
+  await t.test('ordinary accounts cannot access the native administrator UI or API', async () => {
     state.role = 'user';
-    assert.equal((await request('/')).status, 403);
+    assert.equal((await request('/console.html')).status, 403);
     assert.equal((await request()).status, 403);
     assert.equal(state.targetCalls.length, 0);
     state.role = 'admin';
   });
   await t.test('valid old admin cookies authorize each request without a new account', async () => {
     const calls = state.authCalls.length;
-    assert.equal((await request('/')).status, 200);
+    assert.equal((await request('/console.html')).status, 200);
     assert.equal((await request()).status, 200);
     assert.equal(state.authCalls.length, calls + 2);
     const incoming = state.authCalls.at(-1);
-    assert.equal(incoming.url, '/api/auth/status');
-    assert.equal(incoming.headers.cookie, 'qq_console_session=fixture-cookie');
-    assert.equal(incoming.headers['x-console-token'], undefined);
+    assert.equal(incoming.cookie, 'qq_console_session=fixture-cookie');
+    assert.equal(Object.hasOwn(incoming, 'url'), false, 'authentication is a local call, not legacy HTTP');
   });
   await t.test('forwarding rewrites origin/host, injects only the private token and strips browser credentials', async () => {
     const response = await request('/api/config?token=fixture-attacker&access_token=fixture-attacker', { headers: {
