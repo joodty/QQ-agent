@@ -609,6 +609,8 @@ async function api(path, options = {}) {
     ...rest,
     ...(keepalive ? { keepalive: true } : {})
   });
+  // This is a UI capability hint only; the gateway still enforces every route.
+  if (res.headers?.get?.('x-qq-agent-console-mode') === 'restricted-admin') state.restrictedAdminConsole = true;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;

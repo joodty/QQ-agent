@@ -107,4 +107,26 @@ test('native persona saves use exact chat patches accepted by the admin gateway'
     assert.equal(adminProxyRouteAllowed('POST', '/api/config', { personaByChat: { __replace__: {} } }), false);
     assert.equal(adminProxyRouteAllowed('POST', '/api/config', { server: { port: 1234 } }), false);
   });
+  await t.test('the gateway mode skips automatic and manual update requests without changing native desktop behavior', async () => {
+    // Run the actual client request and update-check functions without booting
+    // unrelated UI timers, third-party widgets or runtime services.
+    const core = fs.readFileSync(new URL('../ui/app/00-core.js', import.meta.url), 'utf8');
+    const feedback = fs.readFileSync(new URL('../ui/app/10-feedback.js', import.meta.url), 'utf8');
+    const apiSource = core.slice(core.indexOf('async function api('), core.indexOf('\nfunction fmtTime('));
+    const updateSource = feedback.slice(feedback.indexOf('async function runUpdateCheck('), feedback.indexOf('\nlet updateLatest'));
+    const requests = [];
+    const context = vm.createContext({ state: {}, CONSOLE_MARKER: 'fixture-console-marker-for-testing',
+      fetch: async route => { requests.push(route); return { ok: true, headers: { get: () => route === '/api/status' ? 'restricted-admin' : null },
+        json: async () => ({ ok: true, hasUpdate: false }) }; },
+      updateLatest: null, updateAvailable: false, updateToastDismissed: false, renderUpdateDot: () => {}, showUploadToast: () => {}
+    });
+    vm.runInContext(apiSource + '\n' + updateSource, context);
+    await context.runUpdateCheck(); assert.deepEqual(requests, ['/api/update-check']);
+    await context.api('/api/status'); assert.equal(context.state.restrictedAdminConsole, true);
+    const before = requests.length;
+    assert.equal((await context.runUpdateCheck()).disabled, true);
+    assert.match((await context.runUpdateCheck({ manual: true })).error, /维护者部署/);
+    assert.equal(requests.length, before);
+    assert.equal(adminProxyRouteAllowed('GET', '/api/update-check'), false);
+  });
 });

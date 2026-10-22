@@ -82,6 +82,7 @@ test('private admin gateway preserves original authentication and keeps the new 
       authorization: 'fixture-untrusted', 'x-console-token': 'fixture-untrusted', 'x-agent-token': 'fixture-untrusted', 'x-agent-call': 'fixture'
     } });
     assert.equal(response.status, 200);
+    assert.equal(response.headers['x-qq-agent-console-mode'], 'restricted-admin');
     const forwarded = state.targetCalls.at(-1);
     assert.equal(forwarded.headers.host, `127.0.0.1:${targetPort}`);
     assert.equal(forwarded.headers.origin, `http://127.0.0.1:${targetPort}`);

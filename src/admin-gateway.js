@@ -147,7 +147,8 @@ export function createAdminGateway({ publicOrigin, authOrigin = 'http://127.0.0.
       accept: String(req.headers.accept || '*/*') };
     if (buffer) { headers['content-type'] = 'application/json'; headers['content-length'] = String(buffer.length); }
     const upstream = http.request(new URL(url.pathname + url.search, targetUrl), { method: req.method, headers }, response => {
-      const outgoing = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' };
+      const outgoing = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
+        'x-qq-agent-console-mode': 'restricted-admin' };
       for (const [key, value] of Object.entries(response.headers)) if (RESPONSE_HEADERS.has(key) && value !== undefined) outgoing[key] = value;
       const isSse = String(response.headers['content-type'] || '').startsWith('text/event-stream');
       res.writeHead(response.statusCode || 502, outgoing);

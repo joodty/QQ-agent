@@ -675,6 +675,7 @@ function renderUpdateDot() {
 }
 
 async function runUpdateCheck({ manual = false } = {}) {
+  if (state.restrictedAdminConsole) return { ok: false, disabled: true, error: '此管理入口不提供在线更新，请由维护者部署版本' };
   try {
     const data = await api('/api/update-check');
     if (!data?.ok) return data;   // 网络/服务器错误原样返回，手动检查要显示原因

@@ -85,7 +85,7 @@ node scripts/admin-gateway.mjs --config ABSOLUTE_PRIVATE_CONFIG.json
 
 ## 本地验证与后续事项
 
-`npm run test:gateway` 当前 18 通过、0 失败、0 跳过，其中管理员网关 13 项，原生人设保存/继承兼容 5 项。覆盖管理员角色、匿名/普通拒绝、Cookie 撤销、来源与令牌注入、响应头过滤、危险入口、写请求与 SSE 撤销。旧仓库 `npm run test:engine-handoff` 9 项通过，包含实际 Bridge/SQLite 登录、旧 BYOK/付费投递和 MCP 出站阻断、排队后移交、未获聊天授权的 QQ 本人验证以及注销。上游基线仍有原有两项失败，详见 [工作记录](WORK_LOG.md)。
+`npm run test:gateway` 当前 19 通过、0 失败、0 跳过，其中管理员网关 13 项，原生人设保存/继承及受限模式兼容 6 项。覆盖管理员角色、匿名/普通拒绝、Cookie 撤销、来源与令牌注入、响应头过滤、危险入口、写请求与 SSE 撤销。旧仓库 `npm run test:engine-handoff` 9 项通过，包含实际 Bridge/SQLite 登录、旧 BYOK/付费投递和 MCP 出站阻断、排队后移交、未获聊天授权的 QQ 本人验证以及注销。上游基线仍有原有两项失败，详见 [工作记录](WORK_LOG.md)。
 
 独立的真实应用与网关脱敏验收另外通过 1/1：六种不同虚构敏感值均未出现在七个实际响应体或响应头中，显式密钥查看入口拒绝访问。此项使用隔离配置，不以读取真实秘密来验证公开安全。
 
