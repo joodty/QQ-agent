@@ -1048,6 +1048,14 @@ export function createApp({ log = console.log } = {}) {
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
       if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
+      // The retained account bridge owns this non-paid verification protocol.
+      // Do not put one-time ownership codes into model history or charge for them.
+      if (event.message_type === 'private') {
+        const plain = (Array.isArray(event.message)
+          ? event.message.filter(segment => segment?.type === 'text').map(segment => segment.data?.text || '').join('')
+          : typeof event.message === 'string' ? event.message : '').trim();
+        if (/^(?:绑定|\/bind)\s+[A-Za-z0-9_-]{12}$/.test(plain)) return;
+      }
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;

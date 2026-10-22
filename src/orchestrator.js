@@ -20,6 +20,7 @@ import { skillManager } from './skills/manager.js';
 import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
 import { archiveHistorySection } from './archive-runtime.js';
+import { runWithPaidConversation } from './paid-call-guard.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
@@ -373,7 +374,7 @@ export class Orchestrator {
 
   async wakeCaptured(chatKey, options = {}) {
     try {
-      return await (this.store.withArchive ? this.store.withArchive(chatKey, () => this.wakeInArchive(chatKey, options)) : this.wakeInArchive(chatKey, options));
+      return await runWithPaidConversation(chatKey, () => this.store.withArchive ? this.store.withArchive(chatKey, () => this.wakeInArchive(chatKey, options)) : this.wakeInArchive(chatKey, options));
     } catch (error) {
       if (error?.code !== 'ARCHIVE_CHANGED') throw error;
       if (options.waitingSessionId) this.#finishWaiting(options.waitingSessionId, 'aborted', error.message);
@@ -819,6 +820,10 @@ export class Orchestrator {
       visionEnabled,
       searchEnabled,
       proactive,
+      // Budget throttling distinguishes an explicit request from casual/random participation.
+      directRequest: !proactive && (kind === 'private' || resolveContextTier({ triggerEntries,
+        selfNickname, botName: cfg.persona?.botName || '', selfId: this.onebot.selfId || '',
+        cfg: { ...storeConfigForChat(chatKey), contextTier: 2 }, roll: 100 }).shouldRespond),
       sessionId: session.id
     };
 
@@ -1883,6 +1888,10 @@ export class Orchestrator {
    * false 时使用 cfg.memory.provider/model 指向的目录模型（端点/密钥取自 providers）。
    */
   async #memoryChat(chatKey, messages) {
+    return runWithPaidConversation(chatKey, () => this.#memoryChatInPaidContext(chatKey, messages));
+  }
+
+  async #memoryChatInPaidContext(chatKey, messages) {
     const selection = this.store.captureArchive?.(chatKey) ?? null;
     this.store.assertArchiveCurrent?.(chatKey, selection);
     const controller = new AbortController();
@@ -1893,7 +1902,7 @@ export class Orchestrator {
       const cfg = getConfig();
       const mem = cfg.memory || {};
       if (mem.useChatModel !== false) {
-        const result = await chatCompletion({ messages, temperature: 0.2, signal: controller.signal });
+        const result = await chatCompletion({ messages, temperature: 0.2, signal: controller.signal, purpose: 'memory' });
         this.store.assertArchiveCurrent?.(chatKey, selection);
         return result;
       }
@@ -1905,6 +1914,7 @@ export class Orchestrator {
       const result = await chatCompletion({
         messages,
         temperature: 0.2,
+        purpose: 'memory',
         signal: controller.signal,
         overrides: { baseUrl: p.baseURL, apiKey: p.apiKey, model: mem.model, timeoutMs: 180000 }
       });

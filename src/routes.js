@@ -34,6 +34,7 @@ import { getGlobalBlocklist, updateGlobalBlocklist, FIXED_PRICE_FEED_URL } from 
 import { listAccounts, removeAccount, loginAccount, publishModule, verifyInstallCodes, installByCode } from './market.js';
 import { detectDialect as detectThinkingDialect } from './thinking.js';
 import { switchConversationArchive } from './archive-runtime.js';
+import { productionBudgetOverview, updateProductionBudgetLimits } from './paid-call-guard.js';
 
 /**
  * 构建路由表。
@@ -85,6 +86,20 @@ export function createRoutes(deps) {
   };
 
   return [
+    {
+      method: 'GET', pattern: '/api/production-budgets',
+      handler: async ({ res, json }) => {
+        try { return json(res, 200, productionBudgetOverview()); }
+        catch (error) { return json(res, error.statusCode ?? 503, { error: error.message }); }
+      }
+    },
+    {
+      method: 'PUT', pattern: '/api/production-budgets',
+      handler: async ({ req, res, json }) => {
+        try { return json(res, 200, updateProductionBudgetLimits(await readBody(req))); }
+        catch (error) { return json(res, error.statusCode ?? 400, { error: error.message }); }
+      }
+    },
     {
       method: 'GET', pattern: '/api/conversation-archives',
       handler: async ({ url, res, json }) => {

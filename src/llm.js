@@ -3,6 +3,7 @@
 import { getConfig } from './config.js';
 import { resolveModelPrice, priceAt } from './model-prices.js';
 import { skillManager } from './skills/manager.js';
+import { productionPaidCallGuard } from './paid-call-guard.js';
 import {
   resolveThinkingRequest, buildThinkingParams, stripThinkingParams,
   looksLikeThinkingRejection, extractReasoning, extractReasoningTokens, THINKING_BODY_KEYS
@@ -164,6 +165,7 @@ function buildCandidateApis() {
  *   - 主动中止（abort）
  */
 export function isRetryableError(error) {
+  if (String(error?.code || '').startsWith('PAID_')) return false;
   const msg = String(error?.message ?? error ?? '');
 
   // 主动中止（用户/系统取消）：重试没有意义
@@ -229,6 +231,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
         r._usedApi = overrides ?? getConfig().api;
         return r;
       } catch (error) {
+        if (String(error?.code || '').startsWith('PAID_')) throw error;
         lastError = error;
         if (attempt >= retries || !isRetryableError(error)) break;   // 换下一个候选模型
         const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
@@ -265,7 +268,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
  *    否则会出现"Skill 悄悄多打一次 API"这种既难发现又烧钱的问题。
  *    所以 Skill 只能给函数（改 body / 给建议），重试动作由本函数执行。
  */
-export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null, skillContext = null, maxTokens = 0 }) {
+export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null, skillContext = null, maxTokens = 0, purpose = 'chat' }) {
   const baseApi = overrides || effectiveApi();
   // 主调用路径才切"图片/视频专用模型"（见 specializedModelFor 注释）
   let api = baseApi;
@@ -370,14 +373,38 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
 
   /** 发一次请求。返回 { ok, status, text, headers }，网络层错误直接抛。 */
   const post = async (body) => {
-    const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    const text = await res.text().catch(() => '');
-    return { ok: res.ok, status: res.status, text, contentType: res.headers.get('content-type') || '' };
+    // This guard lives around every real HTTP attempt, including parameter-recovery posts.
+    // Failed/unknown attempts retain their holds; retries cannot reuse that money.
+    const guard = productionPaidCallGuard();
+    let hold = null, sent = false;
+    try {
+      if (guard) {
+        hold = guard.prepare({ api, body, purpose: skillContext?.proactive ? 'proactive' : purpose,
+          direct: skillContext?.directRequest !== false, platformCredential: resolveApiKey(getConfig()) });
+        body = hold.body;
+        if (controller.signal.aborted) throw controller.signal.reason ?? Error('aborted');
+        guard.dispatch(hold);
+      }
+      sent = true;
+      const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const text = await res.text();
+      if (guard) {
+        try { guard.complete(hold, { text, status: res.status }); }
+        catch (cause) { throw Object.assign(Error('费用入账未完成，已暂停进一步付费调用'), { code: 'PAID_LEDGER_UNAVAILABLE', cause }); }
+      }
+      return { ok: res.ok, status: res.status, text, contentType: res.headers.get('content-type') || '' };
+    } catch (e) {
+      if (hold) {
+        try { if (sent) guard.unknown(hold, 'network_error'); else guard.release(hold); }
+        catch (cause) { throw Object.assign(Error('费用账本不可用，已保留原预留并停止调用'), { code: 'PAID_LEDGER_UNAVAILABLE', cause }); }
+      }
+      throw e;
+    }
   };
 
   const baseBody = buildBaseBody();
@@ -391,6 +418,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     res = await post(body);
   } catch (error) {
     clearTimeout(timer);
+    if (String(error?.code || '').startsWith('PAID_')) throw error;
     // 网络/超时失败也要回报账号池（只报 HTTP 失败的话，死端点永远不冷却，调度反复踩坑）
     if (poolAccountId) {
       reportPoolFeedback({ accountId: poolAccountId, ok: false, status: 0, error: String(error?.cause?.message ?? error?.message ?? error).slice(0, 300) });
@@ -422,6 +450,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
         res = await post(retry.body);
       } catch (error) {
         clearTimeout(timer);
+        if (String(error?.code || '').startsWith('PAID_')) throw error;
         // 降级重试的网络失败同样回报账号池
         if (poolAccountId) {
           reportPoolFeedback({ accountId: poolAccountId, ok: false, status: 0, error: String(error?.cause?.message ?? error?.message ?? error).slice(0, 300) });

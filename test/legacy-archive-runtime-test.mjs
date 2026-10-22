@@ -152,6 +152,20 @@ test('imported persona archives remain isolated through the actual Agent runtime
     initialA = app.store.archiveSelection('group:456');
   });
 
+  await t.test('legacy ownership verification codes never enter new model history or trigger a paid reply', async () => {
+    const requests = llm.state.requests.length, sends = onebotHttp.state.sends.length;
+    const before = app.store.recent('private:456', { limit: 100 });
+    for (const content of ['绑定 Abcd1234_Xyz', '/bind Abcd1234_Xyz']) {
+      onebotWs.push({ post_type: 'message', message_type: 'private', user_id: 456, self_id: 888,
+        message_id: ++mid, sender: { user_id: 456, nickname: 'Fixture friend' },
+        message: content.startsWith('/bind') ? content : [{ type: 'text', data: { text: content } }] });
+    }
+    await sleep(450);
+    assert.equal(llm.state.requests.length, requests);
+    assert.equal(onebotHttp.state.sends.length, sends);
+    assert.deepEqual(app.store.recent('private:456', { limit: 100 }), before);
+  });
+
   await t.test('A→B→A uses separate real model prompts, messages, persona and member memory', async () => {
     app.memory.append('group:456', 'memberImpression', 'MEMORY_ONLY_A', { userId: '11111', target: 'Fixture friend' });
     const a = await run('group:456', 'A_FIRST');

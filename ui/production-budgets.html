@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>费用与每日额度 · QQ Agent</title><link rel="stylesheet" href="archives.css"><link rel="stylesheet" href="production-budgets.css"><script type="module" src="production-budgets.js"></script></head>
+<body><main><a href="/">← 返回控制台</a> · <a href="archives.html">人设档案</a>
+<h1>费用与每日额度</h1><p>群聊和私聊分别计算，每个聊天的所有人设共用一份每日额度。按北京时间零点换日。</p>
+<p id="status" role="status">正在读取当前费用…</p>
+<form id="limits"><label for="default-limit">默认每日额度（元）</label><input id="default-limit" type="number" min="0" max="1000000" step="0.000001" required disabled>
+<p>达到80%后减少参与和输出，达到100%后暂停新的付费调用。设为0将暂停新的付费调用。</p>
+<section id="conversations" aria-label="各聊天费用与独立额度"></section>
+<button id="save" type="submit" disabled>保存每日额度</button> <button id="refresh" type="button">刷新当前费用</button></form>
+<p>费用为平台估算。正在请求和费用未知的调用也会占用额度；重启或切换人设不会退回这部分金额。这里仅修改额度，不能修改出资授权、模型价格或 API 密钥。</p>
+</main></body></html>
