@@ -57,7 +57,7 @@
     "test:sticker": "node test/sticker-collect-test.mjs",
     "test:msgid": "node test/message-id-test.mjs",
     "test:coverage": "node test/coverage-offline.mjs && node test/coverage-http.mjs && node test/coverage-e2e.mjs && node test/coverage-ui.mjs && node test/coverage-wiring.mjs",
-    "test:all": "npm test && npm run test:coverage",
+    "test:all": "npm test && npm run test:coverage && npm run test:platform",
     "test:prompt": "node test/test-prompt.mjs && node test/prompt-anchor-test.mjs",
     "test:render": "node test/render-test.mjs",
     "test:scroll": "node test/scroll-test.mjs",
@@ -76,7 +76,9 @@
     "test:safefile": "node test/safe-fetch-file-test.mjs",
     "test:sender": "node test/sender-file-uri-test.mjs && node test/sender-send-path-test.mjs",
     "check:load": "node scripts/preload-check.mjs",
-    "test:wakesem": "node test/wake-semantics-test.mjs"
+    "test:wakesem": "node test/wake-semantics-test.mjs",
+    "test:platform": "node --test test/conversation-context-test.mjs test/conversation-budget-test.mjs test/platform-publication-test.mjs",
+    "check:public": "node scripts/check-platform-publication.mjs"
   },
   "dependencies": {
     "js-yaml": "^5.4.1",

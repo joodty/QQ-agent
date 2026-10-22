@@ -1,4 +1,7 @@
 # QQ Agent（桌面端）
+
+> **本 fork 的群管理扩展**：开发分支为 [`codex/group-management`](https://github.com/joodty/QQ-agent/tree/codex/group-management)。基于同一套 QQ Agent 聊天引擎，逐步适配公共机器人下的群/私聊授权、费用来源、人设档案与每日预算。先读 [扩展交接](doc/platform/HANDOFF.md)、[可复用成果](doc/platform/MIGRATION.md)、[本次开发经验](doc/platform/DEVELOPMENT_LESSONS.md) 和 [开发准备](doc/platform/LOCAL_DEVELOPMENT.md)。当前新增的是独立基础模块，尚未接通多人账号、预算主链或替换原服务；下方保留上游功能说明与作者署名。
+
 ![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Electron-lightgrey)
 ![技术栈](https://img.shields.io/badge/stack-Node.js%20%7C%20原生前端-orange)
 ![测试](https://img.shields.io/badge/tests-24%20suites%20%E2%80%89620%2B%20assertions-brightgreen)

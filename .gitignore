@@ -49,3 +49,12 @@ release/
 community.key
 
 .goal-baseline/
+
+# Platform fork: local development tools, reports and secondary runtime data.
+.local/
+.tools/
+data-*/
+*.dpapi
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
