@@ -356,7 +356,7 @@ export class OneBotClient {
 
   async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
     const segments = OneBotClient.#replyAtSegments({ replyToMessageId, atUserId });
-    segments.push({ type: 'image', data: { file: String(imageUrl) } });
+    segments.push({ type: 'image', data: { file: String(imageUrl), sub_type: 1 } });
     return this.sendSegments(kind, id, segments);
   }
 

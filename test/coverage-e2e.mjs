@@ -422,7 +422,7 @@ c.section('9. 工具 execute 行为');
     session: toolSession,
     memory: app.memory,
     reminders: app.orchestrator.reminders,
-    stickers: app.orchestrator.stickers,
+    stickers: app.orchestrator.stickers.forChat('group:456'),
     emit: () => {}
   });
 

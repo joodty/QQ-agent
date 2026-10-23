@@ -18,6 +18,9 @@ const plain=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const fail=(code,dispatched=false)=>Object.assign(new Error(code),{code,dispatched,chargeOutcome:dispatched?'unknown':'not_sent'});
 const digest=text=>crypto.createHash('sha256').update(text).digest('hex');
 const hmac=(key,text)=>crypto.createHmac('sha256',key).update(text).digest();
+export function safeTencentSpeechErrorCode(value){
+  return typeof value==='string'&&value.length<=100&&/^(?:AuthFailure|UnauthorizedOperation|UnsupportedOperation|InvalidParameter|InvalidParameterValue|MissingParameter|RequestLimitExceeded|LimitExceeded|InternalError|FailedOperation|ResourceNotFound|ResourceUnavailable)(?:\.[A-Za-z0-9_]{1,60})?$/.test(value)?value:null;
+}
 
 export function validateSpeechVoiceOptions({voiceType=101001,speed=0,volume=0}={}) {
   const decimal=(value,min,max)=>typeof value==='number'&&Number.isFinite(value)&&value>=min&&value<=max&&Math.abs(value*100-Math.round(value*100))<1e-8;
@@ -80,8 +83,17 @@ export function createTencentSpeechProvider({fetch:request=(...args)=>globalThis
         const ready=beforeRequest();if(ready?.then)throw fail('SPEECH_REQUEST_INVALID');
         dispatched=true;
         const response=await request(signed.url,{method:'POST',headers:signed.headers,body:signed.body,signal:controller.signal,redirect:'error'});
-        if(!response.ok){void response.body?.cancel().catch(()=>{});throw fail('SPEECH_PROVIDER_REJECTED',true);}
+        if(!response.ok){
+          const rejected=fail('SPEECH_PROVIDER_REJECTED',true);
+          try{const data=await boundedJson(response,controller.signal,65536),code=safeTencentSpeechErrorCode(data?.Response?.Error?.Code);if(code)rejected.providerErrorCode=code;}catch{}
+          throw rejected;
+        }
         const data=await boundedJson(response,controller.signal,2*1024*1024),result=data?.Response;
+        if(plain(result?.Error)){
+          const rejected=fail('SPEECH_PROVIDER_REJECTED',true),code=safeTencentSpeechErrorCode(result.Error.Code);
+          if(code)rejected.providerErrorCode=code;
+          throw rejected;
+        }
         if(!plain(result)||result.Error||result.SessionId!==sessionId||typeof result.RequestId!=='string'||!result.RequestId||typeof result.Audio!=='string'||!result.Audio
           ||result.Audio.length>1400000||result.Audio.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(result.Audio))throw fail('SPEECH_RESPONSE_INVALID',true);
         const audio=Buffer.from(result.Audio,'base64');
@@ -90,7 +102,11 @@ export function createTencentSpeechProvider({fetch:request=(...args)=>globalThis
       } catch(error) {
         if(!dispatched)throw error;
         if(controller.signal.aborted)throw fail(timedOut?'SPEECH_TIMEOUT':'SPEECH_CANCELLED',dispatched);
-        if(typeof error?.code==='string'&&error.code.startsWith('SPEECH_'))throw fail(error.code,dispatched);
+        if(typeof error?.code==='string'&&error.code.startsWith('SPEECH_')){
+          const rejected=fail(error.code,dispatched),code=safeTencentSpeechErrorCode(error.providerErrorCode);
+          if(code)rejected.providerErrorCode=code;
+          throw rejected;
+        }
         throw fail('SPEECH_PROVIDER_FAILED',dispatched);
       } finally {clearTimeout(timer);signal?.removeEventListener('abort',cancel);}
     }

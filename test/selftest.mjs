@@ -445,28 +445,35 @@ refs:
   await waitSessionDone('我又来了');
   pass('群友印象跨运行持久化 + 相关成员注入');
 
-  // ── 场景 6：表情包同步 + SSRF 拦截 + 发表情机制 ──
+  // ── 场景 6：隔离旧收藏 + 当前聊天收录/SSRF + 发表情机制 ──
   const stickers = await app.stickers.sync(true);
-  assert.ok(stickers.entries.length >= 1, '从 mock OneBot 同步到收藏表情');
+  assert.deepStrictEqual(stickers.entries, [], '无来源的QQ全局收藏不注入聊天');
   // 6a. 本地/内网地址的图片必须被拒绝（防护生效即"不发送"）
   llm.state.script.push(
-    { toolCalls: [{ name: 'send_sticker', args: { stickerId: 'st1' } }] },
+    { toolCalls: [{ name: 'collect_sticker', args: { messageId: 90060, note: 'unsafe fixture' } }] },
     { content: 'ok' }
   );
+  const unsafeStickerSource=app.store.appendIncoming('group:456',{mid:90060,ts:Date.now(),senderId:'111',senderName:'fixture',text:'[图片]',media:[{kind:'image',url:`http://127.0.0.1:${PORTS.onebotHttp}/img.png`,file:''}]});
+  app.store.markEntryRead('group:456',unsafeStickerSource.id);
   pushGroupMsg(111, '张三', '来个表情', 9006);
   const stickerSession = await waitSessionDone('来个表情');
   assert.ok(
-    stickerSession.messages.some((m) => m.toolCall?.isError && String(m.toolCall.result).includes('不合法')),
+    stickerSession.messages.some((m) => m.toolCall?.isError && String(m.toolCall.result).includes('没有取得有效图片')),
     '内网图片地址被 SSRF 防护拦截并回传模型'
   );
   pass('表情包安全：内网/本机图片地址被拒绝');
-  // 6b. 发送机制本身：绕过工具直接走发送队列，验证 image 段
+  // 6b. 可信隔离夹具收录当前聊天，再走真实发送队列。
+  const previousStickerDownload=app.stickers.library.download;
+  app.stickers.library.download=async()=>Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlZQAAAAASUVORK5CYII=','base64');
+  let ownedSticker;
+  try{ownedSticker=await app.stickers.forChat('group:456').collect('selftest-owned-sticker',{url:'https://example.test/fixture.png',note:'直发测试'});}finally{app.stickers.library.download=previousStickerDownload;}
   const sendsBeforeSticker = onebotHttp.state.sends.length;
-  await app.sender.sendSticker('group:456', { id: 'st1', desc: '直发测试', url: `http://127.0.0.1:${PORTS.onebotHttp}/img.png` }, {});
+  await app.sender.sendSticker('group:456', ownedSticker, {});
   await waitFor(() => onebotHttp.state.sends.length >= sendsBeforeSticker + 1, 5000, '表情发送');
   const stickerSend = onebotHttp.state.sends.at(-1);
   assert.strictEqual(stickerSend.body.message.at(-1).type, 'image', '表情以 image 段发送');
-  assert.ok(stickerSend.body.message.at(-1).data.file.includes('/img.png'), '表情 URL 正确');
+  assert.ok(stickerSend.body.message.at(-1).data.file.startsWith('file:///'), '只发送当前聊天受控本地图');
+  assert.strictEqual(stickerSend.body.message.at(-1).data.sub_type,1,'收藏图片带紧凑表情标记');
   pass('表情包发送：image 段 + 存档记录');
 
   // ── 场景 7：限频保护 ──
@@ -1476,10 +1483,12 @@ refs:
     const inside = path.join(imgDir, 'ok.png');
     fs.writeFileSync(inside, Buffer.from('89504e470d0a1a0a', 'hex'));
     const outside = path.join(dataDir, 'config.json');
-    assert.ok(localStickerPath(`file:///${inside.replace(/\\/g, '/')}`), '收藏目录内的本地图片应放行');
-    assert.ok(!localStickerPath(`file:///${outside.replace(/\\/g, '/')}`), '收藏目录外的文件必须拒绝');
+    assert.ok(localStickerPath(ownedSticker.url,'group:456'), '当前聊天哈希目录内的有效图片应放行');
+    assert.ok(!localStickerPath(ownedSticker.url,'private:456'), '同号私聊不能借用群图');
+    assert.ok(!localStickerPath(`file:///${inside.replace(/\\/g, '/')}`,'group:456'), '无来源旧收藏目录不能自动公开');
+    assert.ok(!localStickerPath(`file:///${outside.replace(/\\/g, '/')}`,'group:456'), '收藏目录外的文件必须拒绝');
     assert.ok(!localStickerPath('http://example.com/a.png'), '非 file URI 应返回 null');
-    pass('本地表情路径：只允许收藏目录内的文件');
+    pass('本地表情路径：仅当前聊天哈希目录内有效图片可发，旧库隔离');
   }
 
   // ── 场景 40：提醒时间严格校验 + 工具名函数名规范 ──

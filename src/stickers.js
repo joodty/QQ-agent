@@ -186,7 +186,7 @@ export function buildStickerContext(entries, max = 10, { rotatePeriodMin = 60, n
     const id = withId ? ` id=${e.id}` : '';
     return `- ${label}${extra}${id}`;
   });
-  return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/轮换的 ${selected.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
+  return `【可用表情包】当前聊天独立表情库有 ${list.length} 个表情（以下为常用/轮换的 ${selected.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
 }
 
 /** 发送前的表情包策略提示（软策略）。 */

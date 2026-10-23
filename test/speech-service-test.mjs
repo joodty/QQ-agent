@@ -178,8 +178,8 @@ test('trial global cap and same-chat concurrent cooldown are enforced by the sam
 });
 
 test('failed or timed-out synthesis is charged unknown conservatively, never retried or treated as free-package zero',async t=>{
-  const f=await fixture(t);f.enable();f.plans.push({status:401,raw:JSON.stringify({secret:secret.secretKey})});
-  await assert.rejects(f.call(),e=>e.code==='SPEECH_PROVIDER_REJECTED'&&e.chargeOutcome==='unknown'&&!String(e).includes(secret.secretKey));
+  const f=await fixture(t);f.enable();f.plans.push({status:401,raw:JSON.stringify({Response:{Error:{Code:'AuthFailure.SecretIdNotFound',Message:secret.secretKey}}})});
+  await assert.rejects(f.call(),e=>e.code==='SPEECH_PROVIDER_REJECTED'&&e.providerErrorCode==='AuthFailure.SecretIdNotFound'&&e.chargeOutcome==='unknown'&&!String(e).includes(secret.secretKey));
   f.advance(1001);f.plans.push({hang:true});await assert.rejects(f.call(),{code:'SPEECH_TIMEOUT',chargeOutcome:'unknown'});
   assert.equal(f.requests.length,2);assert.equal(f.guard.status('group:101').reservedCny,.00036);assert.equal(f.guard.status('group:101').spentCny,0);
   assert.equal(f.guard.records().filter(r=>r.state==='released').length,0);

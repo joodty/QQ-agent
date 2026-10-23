@@ -808,7 +808,7 @@ export class Orchestrator {
     // 表情库快照（提示词用）
     let stickerEntries = [];
     if (cfg.sticker?.enabled !== false) {
-      try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
+      try { stickerEntries = (await (this.stickers.forChat?.(chatKey) || this.stickers).sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
     // ── 统一可用性上下文 ──
@@ -985,7 +985,7 @@ export class Orchestrator {
       onebot: this.onebot,
       store: this.store,
       memory: this.memory,
-      stickers: this.stickers,
+      stickers: this.stickers?.forChat?.(chatKey) || this.stickers,
       sender: this.sender,
       session,
       reminders: this.reminders,

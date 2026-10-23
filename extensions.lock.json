@@ -2,7 +2,7 @@
   "format": "qq-agent-extension-lock",
   "version": 1,
   "reviewedAt": "2026-10-23",
-  "runtimeBaseRef": "577229a1623323b43afa12bb7402b15979d87615",
+  "runtimeBaseRef": "51be239edf79ccc8e63b6a22241fd8a3a697f744",
   "extensions": [
     {
       "id": "meal-picker",
@@ -186,6 +186,70 @@
       "capabilities": [
         "chat.ban-state"
       ],
+      "license": {
+        "status": "not-declared",
+        "redistributeSource": false
+      },
+      "adaptation": null
+    },
+    {
+      "id": "face-decode",
+      "kind": "plugin",
+      "name": "QQ自带表情转译",
+      "version": "1.1.0",
+      "localRevision": null,
+      "source": {
+        "catalogUrl": "https://www.kondius.cn/api/community/plugins",
+        "downloadUrl": "https://www.kondius.cn/api/community/plugins/face-decode/download",
+        "zipSha256": "7f440d59dd91e7323677f7d6c59590bc0be6605c6f87db9f6aef8017b3080544",
+        "zipBytes": 5588,
+        "marketAuthor": "林枫灬寒霜",
+        "manifestAuthor": "QQ Agent",
+        "updatedAt": "2026-10-08T07:01:38Z"
+      },
+      "moduleRoot": "face-decode",
+      "manifest": "plugin.json",
+      "sourceFiles": [
+        {
+          "path": "index.js",
+          "bytes": 3856,
+          "sha256": "e1f409a5f6fda323a4731da648cb546a696f3f38f15443397f3f6d32fc419d7f"
+        },
+        {
+          "path": "lib/faces.mjs",
+          "bytes": 5742,
+          "sha256": "079f6f33548f276b52e8cdecc64c505b3cb122d39eb494393c4f40096d370407"
+        },
+        {
+          "path": "plugin.json",
+          "bytes": 650,
+          "sha256": "d4e3c2ec3539154a3b17f27951d3d489d1b7f0c8a769dbdcd086a70fd87a3732"
+        }
+      ],
+      "files": [
+        {
+          "path": "index.js",
+          "bytes": 3856,
+          "sha256": "e1f409a5f6fda323a4731da648cb546a696f3f38f15443397f3f6d32fc419d7f"
+        },
+        {
+          "path": "lib/faces.mjs",
+          "bytes": 5742,
+          "sha256": "079f6f33548f276b52e8cdecc64c505b3cb122d39eb494393c4f40096d370407"
+        },
+        {
+          "path": "plugin.json",
+          "bytes": 650,
+          "sha256": "d4e3c2ec3539154a3b17f27951d3d489d1b7f0c8a769dbdcd086a70fd87a3732"
+        }
+      ],
+      "defaults": {
+        "enabled": true,
+        "settings": {}
+      },
+      "permissions": [],
+      "requires": [],
+      "capabilities": [],
       "license": {
         "status": "not-declared",
         "redistributeSource": false

@@ -654,8 +654,14 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
-  const stickers = new StickerManager(onebot);
   const departedGroups = new Set();
+  let stickerIngressReady = false;
+  const stickers = new StickerManager(onebot, { canUse: chatKey => {
+    if (!stickerIngressReady) return false;
+    const match = /^(group|private):([1-9]\d*)$/.exec(String(chatKey));
+    if (!match || !Number.isSafeInteger(Number(match[2]))) return false;
+    try { return resourceAllowed(match[1], match[2], getConfig()); } catch { return false; }
+  } });
   const sender =   new SendQueue({
     onebot, store,
     canSend: chatKey => !departedGroups.has(chatKey),
@@ -701,6 +707,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     if (denied.map(String).includes(String(id))) return false;
     return allowed(kind, id, current) || Boolean(platformBusiness?.runtimeAllowed(`${kind}:${id}`));
   }
+  stickerIngressReady = true;
 
   // 远程价格表固定为官网公开地址；不从用户配置读取，避免被页面/配置篡改。
   initPriceFeed(FIXED_PRICE_FEED_URL);
@@ -963,6 +970,13 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
       atMe,
       atNames
     });
+    // Only trusted, admitted inbound messages reach this point. The manager
+    // checks the original image subtype and queues a bounded local-only copy;
+    // do not await it, involve a model or copy QQ binding/notice/self events.
+    try {
+      stickers.autoCollect(`${kind}:${id}`, { entry, segments })
+        .catch(() => log('[sticker] 自动收录未完成，原消息处理继续'));
+    } catch { log('[sticker] 自动收录未完成，原消息处理继续'); }
     emit('chat-update', `${kind}:${id}`);
     // 逐条触发判定：把刚入库的条目交给编排器（entry 让它能精确标这一条已读）
     orchestrator.onIncoming(`${kind}:${id}`, entry);
@@ -1745,6 +1759,8 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   }
 
   async function stop() {
+    stickerIngressReady = false;
+    await stickers.close();
     if (groupPermissionTimer) clearInterval(groupPermissionTimer);
     await groupPermissionRefresh;
     // 先停掉热重载 watcher：否则 stop() 之后文件变动仍会触发重载 + 广播

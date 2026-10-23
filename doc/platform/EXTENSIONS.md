@@ -1,8 +1,36 @@
 # 官方市场扩展：选择、锁定与安装
 
-本页针对 QQ Agent 的插件与 Skill，不是 Codex 技能。来源为 [官网](https://kondius.cn/qq-agent/index.html)、[Skill 市场](https://www.kondius.cn/qq-agent/skill-market/) 和 [插件市场](https://www.kondius.cn/qq-agent/plugin-market/)。2026-10-23 只读获取的市场列表包含 430 个 Skill、555 个插件；列表会变化，不能据此承诺所有扩展都已审查。
+本页针对 QQ Agent 的插件与 Skill，不是 Codex 技能。来源为 [官网](https://kondius.cn/qq-agent/index.html)、[Skill 市场](https://www.kondius.cn/qq-agent/skill-market/) 和 [插件市场](https://www.kondius.cn/qq-agent/plugin-market/)。2026-10-23 首批列表为 430 个 Skill、555 个插件，本轮互动扩展刷新为 434/579；只静态审阅少量相关候选，不据目录数量承诺全部扩展已审过。
 
-## 本次选择
+## 本轮互动补强（隔离验收通过，待部署）
+
+本轮只选一个新增插件 `face-decode`，保留前三个已安装扩展。自动收藏与聊天隔离属于原生能力补强，不另装一个全局收藏插件或新增 OneBot 监听连接。
+
+| 候选 | 版本 | 静态结论 |
+| --- | --- | --- |
+| `face-decode` / QQ 自带表情转译 | 1.1.0 | 入选；293 项静态编号表，把当前 user 提示词中的 QQ 小表情编号译为名称。无网络、模型、后台任务或全局用户状态；未知编号保持原样 |
+| `sticker-cap` / 表情库上限 | 1.0.0 | 不装；只在工具前预检、缓存目录统计十秒、异常放行，不覆盖自动入站收藏或并发硬上限，还会改全局收藏同步；改为原生容量与限频控制 |
+| `sticker-memory` / 表情包记忆库 | 1.0.0 | 不装；默认 global 含义、跨聊天复用和全局查删，不符合隔离；另有任意协议端本地路径读取与下载重定向边界问题 |
+| `sticker-send-as-emoji` / 紧凑表情发送 | 1.0.0 | 不装；虽不绕发送队列，但猴补两个 OneBot 原型且禁用后重启用不重新挂载。由原生表情发送加入 `sub_type=1` |
+| `probability-reply` / 戳一戳概率回应 | 1.0.0 | 不装；宣称零 token 所需的运行前能力在当前内核没有消费者，兼容路径仍先调用模型，不能把加载成功称为已经省费 |
+
+五个包均无独立许可证声明；原 ZIP 只保留在私有审阅/安装缓存，不复制源码到公共仓库。新插件的原 ZIP 与三个文件全部固定在锁文件中，未经本地源码改写；目录作者与包内作者字段分别保留，不把作者自称当作平台背书。来源为 [face-decode 下载端点](https://www.kondius.cn/api/community/plugins/face-decode/download)，ZIP SHA256 `7f440d59dd91e7323677f7d6c59590bc0be6605c6f87db9f6aef8017b3080544`。
+
+`face-decode` 的当前实际入口是 `before-llm-messages`，只翻译送往模型的 user 文本/多模态文本，不修改图片，也不改 system/assistant。包的 `onMessage` 在本版本没有调用点，不能宣称历史存档已重写。这个编号表不理解自定义表情图像，更不代表免费离线识图；正常回复和用户主动看图仍受原模型费用守卫。
+
+## 原生表情能力
+
+原有 `collectEnabled=true` 只是允许 Agent 按需调用收藏工具，不等于收下所有图片。本轮改为按主机器人和完整 `group:` / `private:` 聊天键保存本地表情：原 `stickers.json` 与 QQ 收藏作为旧资料保持，不默认发布给任何群或私聊；新记录进入独立 `scoped-stickers.json` 和对应聊天的内容哈希目录。
+
+自动入口仅接收允许且未屏蔽聊天中、可信入站消息对应的 `sub_type=1` 表情图；普通图片段（通常是照片、截图）、机器人本人回显、未授权来源和无法确认的图片跳过。这是协议元数据判断，不是图像内容识别。下载失败或 URL 过期也跳过，不伪称已经收藏。不会为自动收藏调用视觉模型、生成含义或加入机器人全局 QQ 收藏；按需备注和发送继续走本聊天的同一工具链。
+
+沿用 `sticker.enabled`、`collectEnabled`、`maxCollectPerHour`，自动入口默认开启，可由 `sticker.autoCollectEnabled=false` 关闭。小时限频持久保存：每聊天最多十张，且尊重配置中更小值；全局每小时三十张。固定边界为单图 3 MiB、每聊天六十张/60 MiB、全局二百张/200 MiB；单任务八秒预算、一次只下载一张，在途与排队合计最多四项。内容去重、容量与落盘在底座统一处理，不能用多群并发或重启清空频率。
+
+相同数字的群和私聊不共用图片、备注或可发送 ID，发送仍复核原档案、出资授权与退群状态。收藏时不多调用模型，不代表后续识图、正常模型回复或加入提示词不计 token。协议端能否保留全部表情标记以及手机紧凑渲染还受实际客户端版本影响，需按生产事实区分已验证和未验证。
+
+当前生产使用 DeepSeek 纯文本模型，`vision=false`。自动收录只保存当前聊天的图片，AI 不会因此自动理解内容；没有备注的表情需要用户说明含义，或手动收藏并备注。将来显式选择获授权的视觉模型后，才能通过同一 `get_sticker_image` 工具和统一预算按需识图。本轮不开启视觉、免费批量标注或恢复旧九条全局收藏共享。
+
+## 首批选择
 
 | 扩展 | 市场版本 | 用途、依赖与费用 | 处理 |
 | --- | --- | --- | --- |
@@ -61,11 +89,11 @@ node scripts/install-reviewed-extensions.mjs --lock ABSOLUTE_RELEASE/extensions.
 
 ## 验证与生产状态
 
-`npm run test:extensions` 覆盖锁定来源、两项安装期修订、真实 loader/工具与隔离 HTTP，以及安装器校验、幂等、批量失败清理和精确回退。本轮缓存固定原包后实际为 23/23，零失败/跳过；没有外网、付费模型或 QQ 发送。另有五项私有审包场景，包含禁言能力的真实 Orchestrator 消费，以及复现未选回复安全网的并发草稿问题。
+`npm run test:extensions` 覆盖锁定来源、两项安装期修订、真实 loader/工具与隔离 HTTP，以及安装器校验、幂等、批量失败清理和精确回退。缓存固定原包后本轮实际为 30/30，零失败/跳过，包含新增 face 的七项锁定、真实 Agent 提示词、同号群私、未知编号、启停重载与精确回退场景；未发起外网、付费模型或 QQ 发送。原生应用启动的公共元数据访问也由夹具阻断。首批另有五项私有审包场景，包含禁言能力的真实 Orchestrator 消费，以及复现未选回复安全网的并发草稿问题。
 
-公共测试不附带未声明许可的原包，不会自行联网下载。包集成测试使用 `QQ_AGENT_EXTENSION_CACHE` 指向私有缓存，其中须有哈希匹配的 `skills-meal-picker.zip` 和 `skills-my-weather.zip`；缺少时明确标记 skip，不应将其算作已实测通过。`test:all` 已串联此入口，但仍有本地开发文档列出的既有上游失败，应按实际结果逐项报告。
+公共测试不附带未声明许可的原包，不会自行联网下载。包集成测试使用 `QQ_AGENT_EXTENSION_CACHE` 指向私有缓存，其中须有哈希匹配的 `skills-meal-picker.zip`、`skills-my-weather.zip` 和 `plugins-face-decode.zip`；face 也接受锁文件原 ZIP SHA 加 `.zip` 的文件名。缺少时明确标记 skip，不应将其算作已实测通过。`test:all` 已串联此入口及原生 `test:interactions`，但仍有本地开发文档列出的既有上游失败，应按实际结果逐项报告。
 
-三个固定官方包已完成隔离预览三包、应用三包、重复应用零新增、精确回退三包，最终修订文件摘要全部匹配；又从真实 Git archive 重放一遍，验证 Git 字节与补丁摘要没有行尾差异。
+本轮四个固定官方包已完成隔离预览四包、应用四包、重复应用零新增、精确回退四包，不执行包代码；face 另经过真实加载与 Agent HTTP 夹具。首批三个包还曾从真实 Git archive 重放一遍，验证 Git 字节与补丁摘要没有行尾差异。本轮新增插件和原生底座尚待生产发布，以下为首批安装的历史验收。
 
 2026-10-23 生产启用完成，部署扩展来源为 [837ce00](https://github.com/joodty/QQ-agent/commit/837ce0016dcc7e93c6c54feb700913797ed82097)，聊天核心继续沿用已验收版本。三个模块均为 loaded/enabled/active，两个工具和禁言能力在真实 manager 中可用。逐包执行三次本机显式重载，没有重启聊天服务，QQ、OneBot 和代理保护进程保持。
 

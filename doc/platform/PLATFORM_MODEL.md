@@ -94,6 +94,8 @@ schema 2 增加资源音色/语速/音量三列，schema 3 再增加自动语音
 
 人设档案和账号库之外，上游原生的单次 Agent 运行记录、部分记忆、用量报表及全局配置仍保留文件存储。这次迁移不等于将 QQ Agent 的所有存储都换成 SQLite，也不等于重放 DSH 的专属执行器。运行详情默认不返回庞大 provider raw；管理员点击 JSON 时才读取。
 
+表情本轮新增独立 `scoped-stickers.json`（版本 1），以 `botId + 完整聊天键 + 内容 SHA` 定位条目，保存本聊天的图片元数据、备注/标签、使用记录及持久小时收录时间。图片在对应聊天的内容哈希目录，群和私聊同号也不共享可发送 ID；原 `stickers.json` 和 QQ 全局收藏保留为归属未证明的旧资料，不据旧 `source` 字段默认发布。它仍是受校验、原子落盘的本地文件，不冒称已建 SQL 表；全局/单聊天的磁盘、数量和频率共同约束，细节见 [扩展与原生补强](EXTENSIONS.md)。
+
 一段会话历史能够恢复，不保证供应商的提示缓存仍命中。账本金额来自约定价格与可验证用量，是平台估算，供应商实际账单是另一条事实来源。跨午夜、未知用量、重试和平台体验总额需继续遵守统一预算内核约束。
 
 相关实现：`src/platform-store.js`、`platform-auth.js`、`platform-business.js`、`conversation-archives.js`、`conversation-budget.js`、`paid-call-guard.js`、`speech-service.js`。公开帮助页仅演示以上结构，不提供数据库浏览功能。

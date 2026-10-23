@@ -58,6 +58,12 @@ test('pre-dispatch cancellation or admission failure never sends; supplier error
   await assert.rejects(f.call(),e=>e.code==='SPEECH_PROVIDER_REJECTED'&&e.dispatched&&e.chargeOutcome==='unknown'&&!String(e).includes(credentials.secretKey));assert.equal(f.requests.length,1);
 });
 
+test('only recognized Tencent error codes survive; provider messages, headers and arbitrary codes remain private',async t=>{
+ const f=await fixture(t);f.scripts.push({result:{Error:{Code:'UnsupportedOperation.NoFreeAccount',Message:credentials.secretKey}}});
+ await assert.rejects(f.call(),e=>e.code==='SPEECH_PROVIDER_REJECTED'&&e.providerErrorCode==='UnsupportedOperation.NoFreeAccount'&&!String(e).includes(credentials.secretKey));
+ f.scripts.push({result:{Error:{Code:credentials.secretKey,Message:credentials.secretKey}}});await assert.rejects(f.call(),e=>e.providerErrorCode===undefined&&e.code==='SPEECH_PROVIDER_REJECTED');assert.equal(f.requests.length,2);
+});
+
 test('total timeout covers a stalled response body and caller cancellation closes an in-flight request',async t=>{
   const f=await fixture(t);f.scripts.push({hangBody:true});const at=Date.now();await assert.rejects(f.call({timeoutMs:1000}),{code:'SPEECH_TIMEOUT',chargeOutcome:'unknown'});assert.ok(Date.now()-at<2500);assert.equal(f.requests.length,1);
   let started;const began=new Promise(r=>started=r),controller=new AbortController();f.scripts.push({hangBody:true,started});const pending=f.call({signal:controller.signal});await began;controller.abort();await assert.rejects(pending,{code:'SPEECH_CANCELLED',dispatched:true});assert.equal(f.requests.length,2);

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { getConfig } from './config.js';
 import { productionPaidCallGuard,runWithPaidConversation,capturePaidFunding,capturePaidAuthority,assertPaidAuthority } from './paid-call-guard.js';
-import { createTencentSpeechProvider,validateSpeechCredential,quoteSpeechText,validateSpeechVoiceOptions,TENCENT_SPEECH,TENCENT_SPEECH_VOICES,SPEECH_VOICE_LIMITS } from './speech-provider.js';
+import { createTencentSpeechProvider,validateSpeechCredential,quoteSpeechText,validateSpeechVoiceOptions,safeTencentSpeechErrorCode,TENCENT_SPEECH,TENCENT_SPEECH_VOICES,SPEECH_VOICE_LIMITS } from './speech-provider.js';
 
 const APP_ID=0x51535048,SCHEMA=3;
 const key=x=>typeof x==='string'&&/^(group|private):[1-9]\d*$/.test(x)&&Number.isSafeInteger(Number(x.split(':')[1]));
@@ -125,7 +125,9 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
       } catch(error){
         if(token&&!settled){try{if(dispatched)ledger.unknownService(token,error?.code==='SPEECH_CANCELLED'?'cancelled':'provider_error');else ledger.releaseService(token);}catch{throw fail('SPEECH_LEDGER_UNAVAILABLE',503,dispatched?'unknown':'not_sent');}}
         const code=typeof error?.code==='string'&&error.code.startsWith('SPEECH_')?error.code:'SPEECH_ADMISSION_DENIED';
-        throw fail(code,error?.statusCode||403,settled?'settled':dispatched?'unknown':'not_sent');
+        const rejected=fail(code,error?.statusCode||403,settled?'settled':dispatched?'unknown':'not_sent');
+        const providerErrorCode=safeTencentSpeechErrorCode(error?.providerErrorCode);if(providerErrorCode)rejected.providerErrorCode=providerErrorCode;
+        throw rejected;
       } finally {if(slot)activeSyntheses--;}
     },
     close(){if(!closed){db.close();closed=true;}}

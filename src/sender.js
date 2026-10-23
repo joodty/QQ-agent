@@ -252,6 +252,7 @@ export class SendQueue {
 
   /** 发送一个收藏表情（独立气泡）。 */
   sendSticker(chatKey, sticker, options = {}) {
+    if(sticker?.chatKey!==chatKey||sticker?.botId!=='primary')return Promise.reject(Object.assign(Error('STICKER_SCOPE_DENIED'),{code:'STICKER_SCOPE_DENIED'}));
     const selection = this.#capture(chatKey);
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
@@ -278,6 +279,9 @@ export class SendQueue {
       let data;
       const primary = String(sticker.url || '').trim();
       if (!primary) throw new Error(`表情 ${sticker.id} 没有可发送的图片地址`);
+      const {localStickerPath:ownedStickerPath}=await import('./sticker-manager.js');
+      this.#guard(chatKey,selection);
+      if(sticker.chatKey!==chatKey||!ownedStickerPath(primary,chatKey))throw Object.assign(Error('STICKER_IMAGE_UNAVAILABLE'),{code:'STICKER_IMAGE_UNAVAILABLE'});
       try {
         data = await sendVia(primary);
       } catch (firstError) {
@@ -288,7 +292,7 @@ export class SendQueue {
           //（sendImage 早有同款回退；这里曾经直接 throw，本地收藏因此"永远发不出去"）。
           const { localStickerPath } = await import('./sticker-manager.js');
           this.#guard(chatKey, selection);
-          const p = localStickerPath(primary);
+          const p = localStickerPath(primary,chatKey);
           let buf = null;
           try { buf = p ? fs.readFileSync(p) : null; } catch { buf = null; }
           if (!buf?.length) throw firstError;

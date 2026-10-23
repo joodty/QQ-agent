@@ -17,7 +17,7 @@ import { expandForwardNodes } from './onebot.js';
 import { registerTool, listTools } from './tool-registry.js';
 import { holidayOn, upcomingHoliday } from './holidays.js';
 import { compressImage } from './image-compress.js';
-import { localStickerPath } from './sticker-manager.js';
+import { localStickerPath,stickerErrorMessage } from './sticker-manager.js';
 import { isGifBuffer, gifToVideoDataUrl, resolveGifRoute } from './gif-to-video.js';
 
 /** 当前配置的 GIF 选路（vision/video 开关组合，规则矩阵见 resolveGifRoute 注释）。 */
@@ -99,7 +99,7 @@ function ok(payload) {
 }
 
 function err(message) {
-  return { content: `错误：${message}`, isError: true };
+  return { content: `错误：${stickerErrorMessage(message)}`, isError: true };
 }
 
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
@@ -259,7 +259,7 @@ function registerAllTools() {
   registerTool({
     id: 'send_sticker',
     name: '发送表情',
-    description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 从 list_stickers 获取。',
+    description: '发送当前聊天表情库中的一个表情（一条消息只能一张，想说的话先用 send_message 单独发）。stickerId 从当前聊天的 list_stickers 获取。',
     category: 'messaging',
     icon: '😀',
     parameters: {
@@ -286,7 +286,7 @@ function registerAllTools() {
         // 指向任意本地文件（配置、密钥），不设闸就会被 OneBot 发出去。
         const isLocalFile = String(sticker.url).startsWith('file:///');
         if (isLocalFile) {
-          const healed = localStickerPath(sticker.url);
+          const healed = localStickerPath(sticker.url,ctx.chatKey);
           if (!healed) {
             return err(`表情 ${sticker.id} 的本地图片已丢失（受控收藏目录里找不到它），已拒绝发送`);
           }
@@ -316,7 +316,7 @@ function registerAllTools() {
   registerTool({
     id: 'list_stickers',
     name: '查看表情库',
-    description: '查看/搜索你的 QQ 收藏表情（含备注和你的本地笔记）。',
+    description: '查看/搜索当前群或私聊的独立表情库，包含本聊天的备注和标签。',
     category: 'sticker',
     icon: '📋',
     parameters: {
@@ -353,7 +353,9 @@ function registerAllTools() {
         const sticker = await ctx.stickers.find(args.stickerId);
         if (!sticker) return err(`找不到表情 ${args.stickerId}`);
         if (!sticker.url) return err('该表情没有图片地址');
-        const r = await downloadImageAsDataUrl(sticker.url);
+        const r = typeof ctx.stickers.image==='function'
+          ? await ctx.stickers.image(sticker.id)
+          : await downloadImageAsDataUrl(sticker.url);
         const built = getImagePartsOrVideo(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [r]);
         if (r.gifVideo) {
           built.content[0].text += `\n（这是 GIF 动图，已转成 ${r.gifVideo.frames} 帧、最长边 ${Math.max(r.gifVideo.width, r.gifVideo.height) || '≤480'}px 的视频输入，画面按视频发给模型）`;
@@ -395,7 +397,7 @@ function registerAllTools() {
   registerTool({
     id: 'collect_sticker',
     name: '收藏表情',
-    description: '收藏别人刚发的表情/图片到你的表情库（偶尔用，收藏前先 get_message_images 看图确认）。需要备注一句简短说明。',
+    description: '把当前聊天里刚发的图片保存到这个聊天的独立表情库，不进入全局QQ收藏；偶尔使用，需备注简短说明。',
     category: 'sticker',
     icon: '⭐',
     parameters: {
@@ -412,8 +414,7 @@ function registerAllTools() {
         if (!entry) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
         const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && (m.url || m.file));
         if (!imageMedia) return err('该消息没有可收藏的图片');
-        // collect 会把图片转存到本地（双保险）并**必定入 QQ 收藏**（add_custom_face，
-        // 即 QQ"把图片变成表情"的同款能力）；QQ 入库失败会在 warning 里如实标注
+        // The bound library stores only current-chat bytes; it never writes QQ favourites.
         const saved = await ctx.stickers.collect(args.messageId, {
           url: imageMedia.url || '',
           file: imageMedia.file || '',
@@ -423,12 +424,10 @@ function registerAllTools() {
           collected: true,
           id: saved.id,
           note: saved.localNote,
-          emojiId: saved.emojiId || '',
-          qqSaved: !!saved.emojiId,
-          localSaved: !!saved.localFile,
-          ...(saved.qqCollectError
-            ? { warning: `已${saved.localFile ? '本地收藏' : '记录'}，但入 QQ 收藏失败：${saved.qqCollectError}` }
-            : {})
+          chatKey:ctx.chatKey,
+          localSaved:true,
+          scope:'current-chat',
+          noteBoundary:'仅当前聊天可用，不会加入QQ全局收藏。'
         });
       } catch (error) {
         return err(error?.message ?? error);
