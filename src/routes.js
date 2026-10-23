@@ -1630,6 +1630,7 @@ export function createRoutes(deps) {
 /** Public workspace services always receive a server-verified Cookie principal.
  * Native administrator tokens alone cannot impersonate a resource owner. */
 export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, chatIdentities, readBody, onebot, orchestrator }) {
+  if(!auth)return [];
   const replySettings=createReplySettings({auth,onChanged:chatKey=>orchestrator?.replySettingsChanged?.(chatKey)});
   // Names are display metadata only. Never load message histories to label a
   // chat, or let a slow QQ lookup delay the workspace overview/settings.

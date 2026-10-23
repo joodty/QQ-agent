@@ -358,15 +358,18 @@ export function productionBudgetOverview() {
     conversations: fundedKeys(cfg, p).map(key => guard.status(key)),
     estimationBoundary: '按已确认价格估算，并保守保留在途与未知费用；不是供应商账单。' };
 }
-/** Called only behind the authenticated management gateway; no platform policy is client-writable. */
-export function updateProductionBudgetLimits(patch) {
+/** Called only behind authenticated management routes. authorizeScope is a
+ * server-only authority check for resources that need not have funding yet;
+ * native callers retain the existing funded-resource boundary. */
+export function updateProductionBudgetLimits(patch,{authorizeScope}={}) {
   const invalid = message => Object.assign(error(message), { statusCode: 400 });
   if (!plain(patch) || Object.keys(patch).some(key => !['version', 'defaultDailyLimitCny', 'overrides'].includes(key)) || typeof patch.version !== 'string') throw invalid('只允许修改默认每日额度和已授权聊天的独立额度');
   const cfg = getConfig(), p = policy(cfg), scopes = new Set(fundedKeys(cfg, p));
   if (patch.version !== limitsVersion(cfg, p)) throw Object.assign(error('额度设置已变化，请刷新后再保存'), { statusCode: 409 });
   const validAmount = amount => money(amount) && Math.abs(amount * MICRO - Math.round(amount * MICRO)) < 0.00001;
   if (Object.hasOwn(patch, 'defaultDailyLimitCny') && !validAmount(patch.defaultDailyLimitCny)) throw invalid('每日额度须为非负数，最多六位小数');
-  if (Object.hasOwn(patch, 'overrides') && (!plain(patch.overrides) || Object.entries(patch.overrides).some(([key, amount]) => !scopes.has(key) || amount !== null && !validAmount(amount)))) throw invalid('只能设置已有授权聊天的每日额度');
+  if (authorizeScope!==undefined&&typeof authorizeScope!=='function') throw invalid('聊天额度授权校验无效');
+  if (Object.hasOwn(patch, 'overrides') && (!plain(patch.overrides) || Object.entries(patch.overrides).some(([key, amount]) => !chatKey(key) || !(scopes.has(key)||authorizeScope?.(key)===true) || amount !== null && !validAmount(amount)))) throw invalid('只能设置已有授权聊天的每日额度');
   const overrides = { ...p.overrides };
   for (const [key, amount] of Object.entries(patch.overrides || {})) { if (amount === null) delete overrides[key]; else overrides[key] = amount; }
   const dailyLimit = patch.defaultDailyLimitCny ?? p.defaultDailyLimitCny;
