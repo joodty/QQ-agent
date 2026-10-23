@@ -2,7 +2,7 @@
 
 本页针对 QQ Agent 的插件与 Skill，不是 Codex 技能。来源为 [官网](https://kondius.cn/qq-agent/index.html)、[Skill 市场](https://www.kondius.cn/qq-agent/skill-market/) 和 [插件市场](https://www.kondius.cn/qq-agent/plugin-market/)。2026-10-23 首批列表为 430 个 Skill、555 个插件，本轮互动扩展刷新为 434/579；只静态审阅少量相关候选，不据目录数量承诺全部扩展已审过。
 
-## 本轮互动补强（隔离验收通过，待部署）
+## 本轮互动补强
 
 本轮只选一个新增插件 `face-decode`，保留前三个已安装扩展。自动收藏与聊天隔离属于原生能力补强，不另装一个全局收藏插件或新增 OneBot 监听连接。
 
@@ -93,7 +93,7 @@ node scripts/install-reviewed-extensions.mjs --lock ABSOLUTE_RELEASE/extensions.
 
 公共测试不附带未声明许可的原包，不会自行联网下载。包集成测试使用 `QQ_AGENT_EXTENSION_CACHE` 指向私有缓存，其中须有哈希匹配的 `skills-meal-picker.zip`、`skills-my-weather.zip` 和 `plugins-face-decode.zip`；face 也接受锁文件原 ZIP SHA 加 `.zip` 的文件名。缺少时明确标记 skip，不应将其算作已实测通过。`test:all` 已串联此入口及原生 `test:interactions`，但仍有本地开发文档列出的既有上游失败，应按实际结果逐项报告。
 
-本轮四个固定官方包已完成隔离预览四包、应用四包、重复应用零新增、精确回退四包，不执行包代码；face 另经过真实加载与 Agent HTTP 夹具。首批三个包还曾从真实 Git archive 重放一遍，验证 Git 字节与补丁摘要没有行尾差异。本轮新增插件和原生底座尚待生产发布，以下为首批安装的历史验收。
+本轮四个固定官方包已完成隔离预览四包、应用四包、重复应用零新增、精确回退四包，不执行包代码；face 另经过真实加载与 Agent HTTP 夹具。首批三个包还曾从真实 Git archive 重放一遍，验证 Git 字节与补丁摘要没有行尾差异。本轮源 [eb938fc](https://github.com/joodty/QQ-agent/commit/eb938fca07920aac88cc2c1da33ce2885acefbb8) 已切换到生产，四个锁包 active 且摘要一致，原九条全局表情元数据全值保持；只读核验已观察到一条自然入站收录，没有读取其图片内容或为验收发送 QQ 表情。手机紧凑渲染仍未验证。以下为首批安装的历史验收。
 
 2026-10-23 生产启用完成，部署扩展来源为 [837ce00](https://github.com/joodty/QQ-agent/commit/837ce0016dcc7e93c6c54feb700913797ed82097)，聊天核心继续沿用已验收版本。三个模块均为 loaded/enabled/active，两个工具和禁言能力在真实 manager 中可用。逐包执行三次本机显式重载，没有重启聊天服务，QQ、OneBot 和代理保护进程保持。
 
