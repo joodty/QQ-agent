@@ -102,12 +102,26 @@ export function createPlatformAuth({ file, store: suppliedStore, publicOrigin, b
     store.grant(after.id, key, wantedBot, { automatic: true, ttlMs: 120000, expectedPermissionVersion: permission });
     return { ok: true, chatKey: key, scopes: listScopes(after), version: store.version() };
   }
+  // Default platform subsidy follows real bindings or unrevoked resource
+  // grants. A historic conversation/administrator's ability to inspect it is
+  // not permission to open spending. Keep account data within this service.
+  function defaultFundingAuthorities(chatKey=null,{botId:wantedBot=botId}={}) {
+    if(chatKey!==null)chatKey=normalizePlatformScopeKey(chatKey);
+    return store.readSnapshot(()=>{
+      const candidates=store.db.prepare('SELECT account_id ownerId,conversation_key chatKey FROM account_scopes WHERE bot_id=?'+(chatKey?' AND conversation_key=?':'')+' ORDER BY account_id').all(wantedBot,...(chatKey?[chatKey]:[]));
+      if(wantedBot===botId)candidates.push(...store.db.prepare("SELECT user_id ownerId,'private:'||qq chatKey FROM qq_bindings"+(chatKey?" WHERE 'private:'||qq=?":'')+' ORDER BY user_id').all(...(chatKey?[chatKey]:[])));
+      const accepted=new Map();
+      for(const row of candidates)if(!accepted.has(row.chatKey)&&ownerCanAccess(row.ownerId,row.chatKey,{botId:wantedBot}))accepted.set(row.chatKey,{chatKey:row.chatKey,version:row.ownerId+':'+store.permissionVersion(row.ownerId,row.chatKey,wantedBot)});
+      return [...accepted.values()];
+    });
+  }
   const service = {
     store, publicOrigin: origin.origin, cookie, clearCookie, publicUser,
     authenticate(header) { const hash = hashCookie(header); return hash ? decorate(store.verifiedSession(hash)) : null; },
     verifyPrincipal, listScopes,
     canAccess(principal, key, options) { try { return store.readSnapshot(() => ownerCanAccess(verifyPrincipal(principal).id, key, options)); } catch { return false; } },
     canUseResourceOwner: ownerCanAccess,
+    defaultFundingAuthorities,
     permissionVersion(userId, key, { botId: wantedBot = botId } = {}) { return store.permissionVersion(userId, normalizePlatformScopeKey(key), wantedBot); },
     invalidateGroup({ botId: wantedBot = botId, groupId, userId } = {}) { return store.invalidateGroup(wantedBot, groupId, userId); },
     async ensureAccess(principal, key, options = {}) {

@@ -16,7 +16,7 @@ const error = (message, code = 'PAID_CALL_DENIED') => Object.assign(Error(messag
 const isDate = x => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x + 'T00:00:00Z')) && new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) === x;
 const stable = x => Array.isArray(x) ? '[' + x.map(stable).join(',') + ']' : plain(x) ? '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + stable(x[k])).join(',') + '}' : JSON.stringify(x);
 const hash = x => crypto.createHash('sha256').update(stable(x)).digest('hex');
-const fundingFingerprint = (p, key) => hash({ endpoint: p.endpoint, model: p.model, prices: p.prices, funding: p.funding[key], outputCap: p.outputCap, imageTokensPerImage: p.imageTokensPerImage ?? null, responseModels: p.verifiedResponseModels || [] });
+const fundingFingerprint = (p, key) => hash({ endpoint: p.endpoint, model: p.model, prices: p.prices, funding: p.funding[key], defaultPlatformFunding:p.defaultPlatformFunding===true, defaultFundingVersion:p.defaultFundingVersion||1, outputCap: p.outputCap, imageTokensPerImage: p.imageTokensPerImage ?? null, responseModels: p.verifiedResponseModels || [] });
 let fundingServices = null;
 export function setPaidCallFundingServices(services) {
   if (services !== null && (typeof services?.resolve !== 'function' || typeof services?.policy !== 'function')) throw error('出资解析服务无效');
@@ -30,12 +30,21 @@ function effectivePolicy(config) {
 function sourceFor(config, key) {
   const p = effectivePolicy(config), resolved = fundingServices?.resolve(key);
   if (resolved?.blocked) throw error('当前出资已停用、被撤销或尚未配置');
-  const source = resolved || (p.funding[key]?.mode === 'platform' && p.funding[key]?.enabled === true ? { id:'platform',version:1,mode:'platform',endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels || [],imageTokensPerImage:p.imageTokensPerImage,scopeAuthorized:false } : null);
+  const source = resolved || (p.funding[key]?.mode === 'platform' && p.funding[key]?.enabled === true ? { id:'platform',version:1,mode:'platform',endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels || [],imageTokensPerImage:p.imageTokensPerImage,scopeAuthorized:false } : defaultPlatformFundingSource(config,key));
   const [kind,id] = String(key).split(':'), denied = config.deny?.[kind === 'group' ? 'groups' : 'private'];
   if (!source || !chatKey(key) || Array.isArray(denied) && denied.map(String).includes(id) || !allowed(config,key) && source.scopeAuthorized !== true) throw error('聊天或出资未获明确授权');
   if (!['platform','trial','byok'].includes(source.mode) || typeof source.id !== 'string' || !Number.isSafeInteger(source.version) || source.version < 1 || typeof source.model !== 'string'
     || !plain(source.prices) || !['inputCnyPerMillion','cacheHitCnyPerMillion','outputCnyPerMillion'].every(k => money(source.prices[k])) || source.prices.reasoningIncluded !== true) throw error('出资没有完整报价');
   return { ...source,endpoint:endpoint(source.endpoint) };
+}
+/** Internal authority is supplied by platform-auth, never by an HTTP field.
+ * Explicit selections (including disabled/invalid BYOK) always take precedence. */
+export function defaultPlatformFundingSource(config,key,authority=null) {
+  const p=policy(config);
+  if(p.defaultPlatformFunding!==true||!chatKey(key)||Object.hasOwn(p.funding,key))return null;
+  const [kind,id]=key.split(':'),denied=config.deny?.[kind==='group'?'groups':'private']||[];
+  if(denied.map(String).includes(id)||!allowed(config,key)&&!authority)return null;
+  return {id:'platform-default:'+key+(authority?':'+hash(authority).slice(0,20):''),version:p.defaultFundingVersion||1,mode:'platform',endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels||[],imageTokensPerImage:p.imageTokensPerImage,scopeAuthorized:Boolean(authority)};
 }
 export function resolvePaidConversationApi(baseApi, { explicitOverride = false } = {}) {
   const context = currentConversationContext();
@@ -76,6 +85,7 @@ function policy(config) {
     || p.verifiedResponseModels !== undefined && (!Array.isArray(p.verifiedResponseModels) || p.verifiedResponseModels.some(x => typeof x !== 'string' || !x || x.length > 200))
     || p.imageTokensPerImage !== undefined && p.imageTokensPerImage !== 1024) throw error('生产费用保护未就绪或缺少完整人民币报价');
   if (!p.prices.inputCnyPerMillion && !p.prices.outputCnyPerMillion) throw error('不能用缺失的零报价开放付费调用');
+  if(p.defaultPlatformFunding!==undefined&&typeof p.defaultPlatformFunding!=='boolean'||p.defaultFundingVersion!==undefined&&(!Number.isSafeInteger(p.defaultFundingVersion)||p.defaultFundingVersion<1))throw error('默认平台资助策略无效');
   for (const [key, limit] of Object.entries(p.overrides)) if (!chatKey(key) || !money(limit)) throw error('会话预算覆盖配置无效');
   for (const [key, f] of Object.entries(p.funding)) if (!chatKey(key) || !plain(f) || typeof f.mode !== 'string' || typeof f.enabled !== 'boolean') throw error('会话出资策略无效');
   for (const [date, rows] of Object.entries(p.initialSpent)) {
@@ -346,14 +356,14 @@ export function productionPaidCallGuard() {
 }
 export function closeProductionPaidCallGuard() { if (production) production.storage.close(); production = null; }
 
-const fundedKeys = (cfg, p) => [...new Set([...Object.keys(p.funding),...(fundingServices?.policy()?.scopeKeys||[])])].filter(key => {try{return Boolean(sourceFor(cfg,key));}catch{return false;}}).sort();
-const limitsVersion = (cfg, p) => hash({ defaultDailyLimitCny: p.defaultDailyLimitCny, overrides: p.overrides, scopes: fundedKeys(cfg, p) });
+const fundedKeys = (cfg, p) => [...new Set([...Object.keys(p.funding),...(p.defaultPlatformFunding===true?[...(cfg.allow?.groups||[]).map(id=>'group:'+id),...(cfg.allow?.private||[]).map(id=>'private:'+id)]:[]),...(fundingServices?.policy()?.scopeKeys||[])])].filter(key => {try{return Boolean(sourceFor(cfg,key));}catch{return false;}}).sort();
+const limitsVersion = (cfg, p) => hash({ defaultDailyLimitCny: p.defaultDailyLimitCny,defaultPlatformFunding:p.defaultPlatformFunding===true,defaultFundingVersion:p.defaultFundingVersion||1, overrides: p.overrides, scopes: fundedKeys(cfg, p) });
 /** Management-only projection: no credentials, endpoints, price table or initial balances. */
 export function productionBudgetOverview() {
   const cfg = getConfig();
   if (!Object.hasOwn(cfg, 'productionBudget') && !production && process.env.QQ_AGENT_REQUIRE_BUDGET !== '1') return { enabled: false, conversations: [] };
   const p = policy(cfg), guard = productionPaidCallGuard();
-  return { enabled: true, currency: 'CNY', version: limitsVersion(cfg, p), defaultDailyLimitCny: p.defaultDailyLimitCny,
+  return { enabled: true, currency: 'CNY', version: limitsVersion(cfg, p), defaultDailyLimitCny: p.defaultDailyLimitCny,defaultPlatformFunding:p.defaultPlatformFunding===true,
     overrides: Object.fromEntries(fundedKeys(cfg, p).filter(key => Object.hasOwn(p.overrides, key)).map(key => [key, p.overrides[key]])),
     conversations: fundedKeys(cfg, p).map(key => guard.status(key)),
     estimationBoundary: '按已确认价格估算，并保守保留在途与未知费用；不是供应商账单。' };
@@ -363,9 +373,10 @@ export function productionBudgetOverview() {
  * native callers retain the existing funded-resource boundary. */
 export function updateProductionBudgetLimits(patch,{authorizeScope}={}) {
   const invalid = message => Object.assign(error(message), { statusCode: 400 });
-  if (!plain(patch) || Object.keys(patch).some(key => !['version', 'defaultDailyLimitCny', 'overrides'].includes(key)) || typeof patch.version !== 'string') throw invalid('只允许修改默认每日额度和已授权聊天的独立额度');
+  if (!plain(patch) || Object.keys(patch).some(key => !['version', 'defaultDailyLimitCny', 'defaultPlatformFunding', 'overrides'].includes(key)) || typeof patch.version !== 'string') throw invalid('只允许修改默认平台资助、每日额度和已授权聊天的独立额度');
   const cfg = getConfig(), p = policy(cfg), scopes = new Set(fundedKeys(cfg, p));
   if (patch.version !== limitsVersion(cfg, p)) throw Object.assign(error('额度设置已变化，请刷新后再保存'), { statusCode: 409 });
+  if(Object.hasOwn(patch,'defaultPlatformFunding')&&typeof patch.defaultPlatformFunding!=='boolean')throw invalid('默认平台资助开关无效');
   const validAmount = amount => money(amount) && Math.abs(amount * MICRO - Math.round(amount * MICRO)) < 0.00001;
   if (Object.hasOwn(patch, 'defaultDailyLimitCny') && !validAmount(patch.defaultDailyLimitCny)) throw invalid('每日额度须为非负数，最多六位小数');
   if (authorizeScope!==undefined&&typeof authorizeScope!=='function') throw invalid('聊天额度授权校验无效');
@@ -373,9 +384,10 @@ export function updateProductionBudgetLimits(patch,{authorizeScope}={}) {
   const overrides = { ...p.overrides };
   for (const [key, amount] of Object.entries(patch.overrides || {})) { if (amount === null) delete overrides[key]; else overrides[key] = amount; }
   const dailyLimit = patch.defaultDailyLimitCny ?? p.defaultDailyLimitCny;
-  validateProductionBudgetConfig({ ...cfg, productionBudget: { ...p, defaultDailyLimitCny: dailyLimit, overrides } });
+  const defaultPlatformFunding=patch.defaultPlatformFunding??(p.defaultPlatformFunding===true),defaultFundingVersion=(p.defaultFundingVersion||1)+(defaultPlatformFunding!==(p.defaultPlatformFunding===true)?1:0);
+  validateProductionBudgetConfig({ ...cfg, productionBudget: { ...p, defaultDailyLimitCny: dailyLimit,defaultPlatformFunding,defaultFundingVersion, overrides } });
   // __replace__ is generated here, never accepted from the browser.
-  updateConfig({ productionBudget: { defaultDailyLimitCny: dailyLimit, overrides: { __replace__: overrides } } });
+  updateConfig({ productionBudget: { defaultDailyLimitCny: dailyLimit,defaultPlatformFunding,defaultFundingVersion, overrides: { __replace__: overrides } } });
   return productionBudgetOverview();
 }
 export function runWithPaidConversation(key, work) {
