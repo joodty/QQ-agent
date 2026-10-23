@@ -4,9 +4,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { productionPaidCallGuard, setPaidCallFundingServices, validateProductionBudgetConfig, updateProductionBudgetLimits, productionBudgetOverview } from './paid-call-guard.js';
-import { updateConfig } from './config.js';
+import { updateConfig,DATA_DIR } from './config.js';
 import { beijingBudgetDate } from './conversation-budget.js';
 import { switchConversationArchive } from './archive-runtime.js';
+import { createPlatformCostSummary } from './platform-management-costs.js';
+import { createPlatformModelManagement } from './platform-management-model.js';
 
 const APP = 0x51425553;
 const fail = (message,statusCode=400) => Object.assign(Error(message),{statusCode});
@@ -80,7 +82,18 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
     const owners=new Map(db.prepare('SELECT * FROM business_personas').all().map(r=>[r.id,r]));
     return archives.personas().filter(v=>{const own=owners.get(v.id);return p.role==='admin'||own?.owner_id===p.id||own?.public===1||associated.has(v.id);}).map(v=>{const own=owners.get(v.id);return {id:v.id,name:v.name,content:v.content,version:own?.version??v.version,editable:p.role==='admin'||own?.owner_id===p.id,historyCount:v.history.filter(x=>x?.kind==='qq-agent-persona-revision').length,originId:own?.origin_id||null};});
   }
+  const managementCosts=createPlatformCostSummary({file:path.join(DATA_DIR,'paid-calls.sqlite'),auth,legacyUsage({from,to,keys}){
+    return db.prepare("SELECT date,chat_key chatKey,SUM(amount_micros) amountMicros FROM business_usage WHERE date BETWEEN ? AND ? AND COALESCE(json_extract(payload_json,'$.botId'),'primary')='primary'"+(keys===null?'':" AND chat_key IN (SELECT value FROM json_each(?))")+' GROUP BY date,chat_key').all(...[from,to,...(keys===null?[]:[JSON.stringify(keys)])]);
+  }});
+  const modelManagement=createPlatformModelManagement({auth,config,providers,onChanged(){
+    const keys=new Set([...Object.keys(config().productionBudget?.funding||{}),...(store?.listChats?.()||[]),...db.prepare('SELECT chat_key FROM business_funding').all().map(row=>row.chat_key)]);
+    for(const chatKey of keys)if(key(chatKey)){const source=effectiveFunding(chatKey);if(source.enabled&&source.mode!=='byok')orchestrator?.archiveChanged?.(chatKey);}
+  }});
   const service={
+    costSummary(principal,input){return managementCosts.summary(principal,input);},
+    managementOverview(principal,input){const p=admin(principal),costs=managementCosts.summary(p,input,true),resources=new Set([...auth.listScopes(p,{botId:'primary'}),...Object.keys(config().productionBudget?.funding||{}),...(store?.listChats?.()||[]),...db.prepare('SELECT chat_key FROM business_funding').all().map(row=>row.chat_key)]);return {scope:'platform',costs,conversationCount:[...resources].filter(key).length};},
+    platformModel(principal){return modelManagement.get(principal);},
+    updatePlatformModel(principal,input){return modelManagement.update(principal,input);},
     runtimeAllowed(chatKey){try{const source=resolveFunding(chatKey),p=validateProductionBudgetConfig(config());return Boolean(source&&!source.blocked||!source&&p.funding[chatKey]?.mode==='platform'&&p.funding[chatKey]?.enabled);}catch{return false;}},
     overview(principal,{summary=false}={}){
       const p=fresh(principal),keys=auth.listScopes(p,{botId:'primary'}),guard=productionPaidCallGuard();

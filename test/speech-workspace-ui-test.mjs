@@ -11,15 +11,15 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
  const f=await createWorkspaceFixture({speechCredentials:()=>configured?credential:null});t.after(()=>f.close());
  const errors=[],console=new VirtualConsole();console.on('jsdomError',error=>errors.push(error.message));
  const html=fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),script=fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8');
- async function mount(cookie){
-  const dom=new JSDOM(html,{url:f.origin+'/workspace.html#speech',runScripts:'outside-only',virtualConsole:console});t.after(()=>dom.window.close());
+ async function mount(cookie,hash='speech'){
+  const dom=new JSDOM(html,{url:f.origin+'/workspace.html#'+hash,runScripts:'outside-only',virtualConsole:console});t.after(()=>dom.window.close());
   const w=dom.window;w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});w.fetch=(route,options={})=>fetch(f.origin+route,{...options,headers:{...options.headers,cookie,origin:f.origin}});w.eval(script);
-  await waitFor(()=>w.document.querySelector('form[data-action="save-speech-settings"]'),5000,'voice page hydrated');return w;
+  await waitFor(()=>w.document.querySelector(`form[data-action="${hash==='admin/speech'?'save-speech-platform':'save-speech-settings'}"]`),5000,'voice page hydrated');return w;
  }
  const user=await mount(f.cookie);
  const chooseVoice=(window,voiceType)=>{const form=window.document.querySelector('form[data-action="save-speech-settings"]');form.querySelector('[data-action="choose-speech-voice"]').click();const search=window.document.getElementById('voice-picker-search');search.value=String(voiceType);search.dispatchEvent(new window.Event('input',{bubbles:true}));window.document.querySelector(`[data-voice-select="${voiceType}"]`).click();window.document.querySelector('[data-voice-confirm]').click();};
  await t.test('ordinary missing-key state gives an honest next step and no credential inputs',()=>{
-  assert.equal(user.document.getElementById('page-title').textContent,'语音回复');
+  assert.equal(user.document.getElementById('page-title').textContent,'语音设置');
   assert.ok(user.document.querySelector('form[data-action="save-speech-settings"] [name="enabled"]').disabled);
   assert.match(user.document.getElementById('main').textContent,/尚未配置腾讯云语音凭据/);
   assert.equal(user.document.querySelector('form[data-action="save-speech-platform"]'),null);
@@ -36,7 +36,7 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
   await waitFor(()=>f.speech.settings(f.principal,'group:789').settings.version===1);
   const row=f.speech.settings(f.principal,'group:789');assert.equal(row.settings.enabled,false);assert.equal(row.settings.voiceType,101030);assert.equal(row.settings.autoVoicePercent,10);
  });
- const adminCookie=f.auth.cookie((await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0],admin=await mount(adminCookie);
+ const adminCookie=f.auth.cookie((await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0],admin=await mount(adminCookie,'admin/speech');
  const submit=(window,action)=>window.document.querySelector(`form[data-action="${action}"]`).dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
  await t.test('administrator cannot enable without credentials and saves only explicit platform and resource limits',async()=>{
   let form=admin.document.querySelector('form[data-action="save-speech-platform"]');assert.ok(form.elements.enabled.disabled);
@@ -44,6 +44,8 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
   form=admin.document.querySelector('form[data-action="save-speech-platform"]');form.elements.enabled.checked=true;form.elements.maxChars.value='100';form.elements.cooldownSec.value='1';form.elements.dailyLimitCny.value='.5';submit(admin,'save-speech-platform');
   await waitFor(()=>f.speech.platformOverview(f.auth.authenticate(adminCookie)).enabled,5000,'platform setting persisted');
   await waitFor(()=>!admin.document.querySelector('form[data-action="save-speech-platform"] button').disabled);
+  admin.location.hash='admin/subsidies';await waitFor(()=>admin.document.getElementById('subsidy-chat-selector'),5000,'dedicated subsidy page');
+  const target=admin.document.getElementById('subsidy-chat-selector');target.value='group:789';target.dispatchEvent(new admin.Event('change',{bubbles:true}));await waitFor(()=>admin.document.querySelector('form[data-action="save-speech-subsidy"]'));
   form=admin.document.querySelector('form[data-action="save-speech-subsidy"]');form.elements.enabled.checked=true;form.elements.dailyLimitCny.value='.1';form.querySelector('[value="platform"]').checked=true;submit(admin,'save-speech-subsidy');
   await waitFor(()=>f.speech.settings(f.principal,'group:789').subsidy.enabled,5000,'resource quota persisted');
   assert.deepEqual(f.speech.settings(f.principal,'group:789').subsidy.allowedFundingModes,['platform']);

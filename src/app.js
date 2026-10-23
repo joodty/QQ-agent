@@ -1391,7 +1391,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
     store, memory, sessions, onebot, orchestrator,
-    platformAuth, platformBusiness,
+    platformAuth, platformBusiness,speechService,
     emit, log,
     localVersion, compareSemver, UPDATE_INFO_URL,
     sanitizeConfig, keyEndpointAllowed, sanitizeProvider,

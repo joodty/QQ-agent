@@ -99,11 +99,14 @@ test('voice browser shares one accessible draft workflow for ordinary and admini
   d.querySelector('[data-voice-close]').click();assert.ok(!f.calls.some(call=>/TextToVoice|completions|send_msg/.test(call.path)));
  });
  const adminCookie=f.auth.cookie((await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0],admin=await mount(adminCookie);
- await t.test('administrator shares the same picker while platform and chat drafts stay independent',()=>{
+ await t.test('administrator shares the same picker while platform and chat drafts stay independent',async()=>{
+  admin.w.location.hash='admin/speech';await waitFor(()=>admin.w.document.querySelector('form[data-action="save-speech-platform"]'));
   open(admin.w,'save-speech-platform');reset(admin.w);filter('category','supernatural',admin.w);admin.w.document.querySelector('[data-voice-select="402000"]').click();
   assert.equal(dialog(admin.w).querySelector('[data-voice-inherit]'),null);admin.w.document.querySelector('[data-voice-confirm]').click();
-  assert.equal(admin.w.document.getElementById('speech-platform-voiceType').value,'402000');assert.equal(admin.w.document.getElementById('speech-chat-voiceType').value,'101001');
+  assert.equal(admin.w.document.getElementById('speech-platform-voiceType').value,'402000');assert.equal(admin.w.document.getElementById('speech-chat-voiceType'),null);
   assert.match(admin.w.document.querySelector('form[data-action="save-speech-platform"] [data-voice-summary]').textContent,/6\.50/);
-  assert.equal(f.speech.platformOverview(f.auth.authenticate(adminCookie)).voiceType,101001);assert.deepEqual(errors,[]);
+  assert.equal(f.speech.platformOverview(f.auth.authenticate(adminCookie)).voiceType,101001);
+  admin.w.location.hash='chat/group%3A789/speech';await waitFor(()=>admin.w.document.getElementById('speech-chat-voiceType'));assert.equal(admin.w.document.getElementById('speech-chat-voiceType').value,'101001');
+  admin.w.location.hash='admin/speech';await waitFor(()=>admin.w.document.getElementById('speech-platform-voiceType'));assert.equal(admin.w.document.getElementById('speech-platform-voiceType').value,'402000');assert.deepEqual(errors,[]);
  });
 });

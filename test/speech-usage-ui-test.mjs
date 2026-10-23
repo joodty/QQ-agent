@@ -29,8 +29,8 @@ test('speech usage renders real authorized HTTP statistics without changing sett
   const html = fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'), script = fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8');
   const errors = [], console = new VirtualConsole(); console.on('jsdomError',error=>errors.push(error.message));
   let usageFailure = false;
-  async function mount(cookie) {
-    const dom = new JSDOM(html,{url:f.origin+'/workspace.html#speech',runScripts:'outside-only',virtualConsole:console}); t.after(()=>dom.window.close());
+  async function mount(cookie,hash='speech') {
+    const dom = new JSDOM(html,{url:f.origin+'/workspace.html#'+hash,runScripts:'outside-only',virtualConsole:console}); t.after(()=>dom.window.close());
     const w = dom.window; w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});
     w.fetch=(route,options={})=>usageFailure&&String(route).startsWith('/api/platform/speech/usage')
       ? Promise.resolve(new Response(JSON.stringify({error:'用量读取暂时失败'}),{status:503,headers:{'content-type':'application/json'}}))
@@ -45,16 +45,17 @@ test('speech usage renders real authorized HTTP statistics without changing sett
     const text=panel(user).textContent;
     assert.match(text,/成功合成/);assert.match(text,/已知 3/);assert.match(text,/1 条旧记录的字符数不可追溯/);
     assert.match(text,/0\.00009/);assert.match(text,/合成成功不代表已发送到 QQ/);assert.match(text,/免费资源包抵扣未同步/);
-    assert.doesNotMatch(text,/fixture-private|fixture-must|group:999/);assert.equal(panel(user).querySelector('#speech-usage-range').options[1].textContent,'我管理的聊天合计');
+    assert.doesNotMatch(text,/fixture-private|fixture-must|group:999/);assert.equal(panel(user).querySelector('#speech-usage-range').options.length,1);assert.equal(panel(user).querySelector('#speech-usage-range').value,'chat');
     assert.equal(panel(user).querySelector('.speech-usage-table tbody tr').children[1].textContent,'2');
   });
-  await t.test('range refresh preserves unsaved voice preferences and all authorized scopes exclude the foreign group', async () => {
-    user.document.querySelector('#speech-chat-speed').value='0.5';submit(user,{days:'1',range:'all'});
-    await waitFor(()=>panel(user).querySelector('.speech-usage-conversations'),5000,'authorized aggregate');
-    assert.match(panel(user).textContent,/按群聊与私聊查看（2 个聊天）/);assert.doesNotMatch(panel(user).textContent,/群聊 999/);
+  await t.test('current-chat filters preserve unsaved preferences while the authorized aggregate API still excludes a foreign group', async () => {
+    user.document.querySelector('#speech-chat-speed').value='0.5';submit(user,{days:'1',range:'chat'});
+    await waitFor(()=>panel(user).querySelector('#speech-usage-days')?.value==='1'&&panel(user).querySelector('.speech-usage-metrics'),5000,'current-chat date filter');
+    assert.doesNotMatch(panel(user).textContent,/群聊 999/);
+    const aggregate=await (await fetch(f.origin+'/api/platform/speech/usage?days=1',{headers:{cookie:f.cookie,origin:f.origin}})).json();assert.equal(aggregate.scope,'authorized');assert.equal(aggregate.conversationCount,2);assert.ok(aggregate.conversations.every(row=>row.chatKey!=='group:999'));
     assert.equal(user.document.querySelector('#speech-chat-speed').value,'0.5');assert.equal(panel(user).querySelector('#speech-usage-days').value,'1');
   });
-  const adminCookie=f.auth.cookie((await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0], admin=await mount(adminCookie);
+  const adminCookie=f.auth.cookie((await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0], admin=await mount(adminCookie,'admin/speech');
   await t.test('administrator platform aggregate includes historical scopes and daily totals without changing speech switches', async () => {
     submit(admin,{days:'30',range:'all'});await waitFor(()=>panel(admin).querySelector('.speech-usage-conversations'),5000,'platform aggregate');
     assert.match(panel(admin).textContent,/按群聊与私聊查看（3 个聊天）/);assert.match(panel(admin).textContent,/群聊 999/);

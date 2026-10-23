@@ -64,8 +64,8 @@ test('workspace loading separates first settings, authenticated state and public
  await t.test('late permission failure from the old group cannot clear the newly selected private conversation',async()=>{
   const x=await mount();await ready(x);const gate=deferred();let held=false;
   x.wire.hook=async(url,options,forward)=>{if(url.pathname==='/api/platform/speech/settings'&&url.searchParams.get('chatKey')==='group:789'&&!held){held=true;await gate.promise;return json({error:'旧群权限已撤销'},403);}return forward();};
-  x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>held);const selector=x.d.getElementById('chat-selector');selector.value='private:777';selector.dispatchEvent(new x.w.Event('change',{bubbles:true}));
-  assert.equal(x.d.querySelector('form[data-action="save-speech-settings"]'),null);await ready(x);const form=x.d.querySelector('form[data-action="save-speech-settings"]');assert.equal(x.d.getElementById('chat-selector').value,'private:777');
+  x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>held);const oldForm=x.d.querySelector('form[data-action="save-speech-settings"]'),selector=x.d.getElementById('chat-selector');selector.value='private:777';selector.dispatchEvent(new x.w.Event('change',{bubbles:true}));
+  await waitFor(()=>x.w.location.hash==='#chat/private%3A777/speech'&&x.d.querySelector('form[data-action="save-speech-settings"]')&&x.d.querySelector('form[data-action="save-speech-settings"]')!==oldForm);const form=x.d.querySelector('form[data-action="save-speech-settings"]');assert.equal(x.d.getElementById('chat-selector').value,'private:777');
   gate.resolve();await waitFor(()=>!x.d.querySelector('[data-action="refresh"]').disabled);await tick();assert.equal(x.d.querySelector('form[data-action="save-speech-settings"]'),form);assert.equal(x.d.getElementById('chat-selector').value,'private:777');assert.equal(x.d.querySelector('[data-retry-load]'),null);
  });
  await t.test('a current permission failure clears private forms and account switching cannot reuse the old identity cache',async()=>{
@@ -78,13 +78,13 @@ test('workspace loading separates first settings, authenticated state and public
  await t.test('account switching clears credential and account editors before delayed identity confirmation',async()=>{
   const adminLogin=await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'}),adminCookie=f.auth.cookie(adminLogin.token).split(';')[0],admin=f.auth.authenticate(adminCookie);
   f.business.saveCredential(admin,{name:'Old administrator editor metadata',endpoint:'https://api.deepseek.com',model:'deepseek-flash',apiKey:'fixture-editor-isolation-key',enabled:true});
-  const x=await mount({view:'accounts',cookie:adminCookie,inspectEditors:true});await waitFor(()=>x.d.querySelector('[data-action="edit-account"]'));x.d.querySelector('[data-action="edit-account"]').click();assert.ok(x.d.querySelector('form[data-action="save-account"]'));
+  const x=await mount({view:'admin/accounts',cookie:adminCookie,inspectEditors:true});await waitFor(()=>x.d.querySelector('[data-action="edit-account"]'));x.d.querySelector('[data-action="edit-account"]').click();assert.ok(x.d.querySelector('form[data-action="save-account"]'));
   await go(x,'keys','#credential-name');x.d.querySelector('[data-action="edit-credential"]').click();assert.equal(x.d.getElementById('credential-name').value,'Old administrator editor metadata');assert.ok(x.w.__editorsForTest().account);
   const second=await f.auth.register({username:'fixture_editor_second',password:'fixture-editor-second-pass'}),gate=deferred();let checking=false;x.wire.cookie=f.auth.cookie(second.token).split(';')[0];
   x.wire.hook=async(url,options,forward)=>{if(url.pathname==='/api/auth/status'){checking=true;await gate.promise;}return forward();};x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>checking);
   assert.equal(x.d.querySelector('form[data-action="save-credential"]'),null);assert.equal(x.d.getElementById('main').getAttribute('aria-busy'),'true');assert.doesNotMatch(x.d.getElementById('main').textContent,/Old administrator editor metadata/);
   assert.equal(x.w.__editorsForTest().credential,null);assert.equal(x.w.__editorsForTest().account,null);
-  gate.resolve();await waitFor(()=>x.d.getElementById('credential-name')&&x.d.getElementById('user-label').textContent.includes('fixture_editor_second'));assert.equal(x.d.getElementById('credential-name').value,'');assert.equal(x.d.getElementById('credential-key').required,true);assert.doesNotMatch(x.d.getElementById('main').textContent,/Old administrator editor metadata/);
+  gate.resolve();await waitFor(()=>x.w.location.hash==='#workbench'&&x.d.getElementById('user-label').textContent.includes('fixture_editor_second'));await go(x,'keys','#credential-name');assert.equal(x.d.getElementById('credential-name').value,'');assert.equal(x.d.getElementById('credential-key').required,true);assert.doesNotMatch(x.d.getElementById('main').textContent,/Old administrator editor metadata/);
   x.wire.hook=async(url,options,forward)=>url.pathname==='/api/platform/overview'?json({...await (await forward()).json(),accountId:'fixture-expired-identity'}):url.pathname==='/api/auth/status'?json({authenticated:false}):forward();
   x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>x.d.querySelector('[data-retry-load]'));assert.match(x.d.getElementById('main').textContent,/登录账号已变化/);assert.equal(x.d.getElementById('main').hasAttribute('aria-busy'),false);assert.equal(x.d.querySelector('form[data-action="save-credential"]'),null);
  });
@@ -98,10 +98,10 @@ test('workspace loading separates first settings, authenticated state and public
  await t.test('an old group history response cannot write into an identically named node on the private page',async()=>{
   const persona=f.business.createPersona(f.principal,{chatKey:'group:789',name:'Loading archive fixture',content:'Synthetic context for loading tests.'}).persona;
   for(const key of ['group:789','private:777'])f.business.applyPersona(f.principal,{chatKey:key,personaId:persona.id,expectedSelectionVersion:f.archives.active(key)?.selectionVersion||0});
-  const x=await mount({view:'chats'});await waitFor(()=>x.d.getElementById('recent-messages'));const gate=deferred();let held=false;
+  const x=await mount({view:'chat/group%3A789/messages'});await waitFor(()=>x.d.getElementById('recent-messages'));const gate=deferred();let held=false;
   x.wire.hook=async(url,options,forward)=>{if(url.pathname==='/api/platform/messages'&&url.searchParams.get('chatKey')==='group:789'){held=true;await gate.promise;return json({messages:[{text:'fixture old group transcript'}]});}return forward();};
-  x.d.querySelector('[data-action="load-messages"]').click();await waitFor(()=>held);const selector=x.d.getElementById('chat-selector');selector.value='private:777';selector.dispatchEvent(new x.w.Event('change',{bubbles:true}));
-  await waitFor(()=>x.d.getElementById('chat-selector')?.value==='private:777'&&x.d.getElementById('recent-messages'));const node=x.d.getElementById('recent-messages');node.textContent='private page marker';gate.resolve();await tick();await tick();assert.equal(node.textContent,'private page marker');
+  x.d.querySelector('[data-action="load-messages"]').click();await waitFor(()=>held);const oldNode=x.d.getElementById('recent-messages'),selector=x.d.getElementById('chat-selector');selector.value='private:777';selector.dispatchEvent(new x.w.Event('change',{bubbles:true}));
+  await waitFor(()=>x.w.location.hash==='#chat/private%3A777/messages'&&x.d.getElementById('chat-selector')?.value==='private:777'&&x.d.getElementById('recent-messages')&&x.d.getElementById('recent-messages')!==oldNode);const node=x.d.getElementById('recent-messages');node.textContent='private page marker';gate.resolve();await tick();await tick();assert.equal(node.textContent,'private page marker');
  });
  assert.deepEqual(errors,[]);
 });

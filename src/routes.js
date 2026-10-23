@@ -1628,7 +1628,7 @@ export function createRoutes(deps) {
 
 /** Public workspace services always receive a server-verified Cookie principal.
  * Native administrator tokens alone cannot impersonate a resource owner. */
-export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, readBody, onebot, orchestrator }) {
+export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, readBody, onebot, orchestrator }) {
   const get = (path, work) => ({ method: 'GET', pattern: '/api/platform/' + path, handler: async ctx => {
     const principal = auth.verifyPrincipal(ctx.principal);
     const chatKey = ctx.url.searchParams.get('chatKey');
@@ -1641,6 +1641,11 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     return ctx.json(ctx.res, 200, await work(principal, input));
   }});
   return [
+    get('cost-summary',(principal,query)=>{for(const name of query.keys())if(name!=='days')throw Object.assign(Error('费用查询参数无效'),{statusCode:400});if(query.getAll('days').length>1)throw Object.assign(Error('费用查询参数无效'),{statusCode:400});return business.costSummary(principal,{days:query.has('days')?Number(query.get('days')):7});}),
+    get('management/overview',(principal,query)=>{for(const name of query.keys())if(name!=='days')throw Object.assign(Error('费用查询参数无效'),{statusCode:400});if(query.getAll('days').length>1)throw Object.assign(Error('费用查询参数无效'),{statusCode:400});return business.managementOverview(principal,{days:query.has('days')?Number(query.get('days')):7});}),
+    get('model-service',principal=>business.platformModel(principal)),
+    write('PUT','model-service',(principal,input)=>business.updatePlatformModel(principal,input)),
+    get('speech-subsidies',principal=>{const p=auth.verifyPrincipal(principal);if(p.role!=='admin')throw Object.assign(Error('仅平台管理员可管理语音资助'),{statusCode:403});if(!speechService)throw Object.assign(Error('语音设置尚未启用'),{statusCode:503});const value=speechService.platformOverview(p,{compact:true});return {platform:{enabled:value.enabled,configured:value.configured},subsidies:value.subsidies||[]};}),
     get('overview', (principal,query) => {
       if(query.has('summary')&&(query.getAll('summary').length!==1||query.get('summary')!=='1'))throw Object.assign(Error('概览查询参数无效'),{statusCode:400});
       const result = business.overview(principal,{summary:query.get('summary')==='1'});

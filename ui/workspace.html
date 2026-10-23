@@ -1,3 +1,58 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>我的聊天 · QQ Agent</title><link rel="stylesheet" href="/platform.css"><script type="module" src="/platform.js"></script></head>
-<body data-page="workspace"><a class="skip-link" href="#main">跳到内容</a><div class="workspace"><aside class="sidebar"><a class="brand" href="/workspace.html">QQ Agent<span>聊天管理</span></a><nav id="navigation" aria-label="主要功能"><a href="#home" data-view="home">概览</a><a href="#chats" data-view="chats">聊天与人设</a><a href="#costs" data-view="costs">费用与额度</a><a href="#speech" data-view="speech">语音回复</a><a href="#keys" data-view="keys">API 配置</a><a href="#account" data-view="account">账号设置</a><a href="#platform" data-view="platform" data-admin hidden>平台设置</a><a href="#accounts" data-view="accounts" data-admin hidden>账号与授权</a><a href="#help" data-view="help">使用帮助</a></nav><div class="sidebar-foot"><button class="quiet" type="button" data-action="theme">浅色 / 深色</button><a href="/console.html" data-admin hidden>高级控制台</a><p>每个账号只管理自己的资源</p></div></aside><div class="workspace-body"><header class="topbar"><div><span id="page-kicker">我的聊天</span><h1 id="page-title">概览</h1></div><div class="user-actions"><span id="user-label">正在读取账号…</span><button type="button" data-action="refresh" class="quiet">刷新</button><button type="button" data-action="logout" class="quiet">退出</button></div></header><div id="feedback" role="status" aria-live="polite" hidden></div><main id="main" tabindex="-1"><div class="loading-state" role="status" aria-live="polite">正在核对账号与聊天权限…</div></main><footer class="page-footer"><a href="/help.html">使用帮助与数据模型</a><span>费用为估算值，以供应商账单及资源包抵扣为准。</span></footer></div></div></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>我的聊天 · QQ Agent</title>
+  <link rel="stylesheet" href="/platform.css">
+  <script type="module" src="/platform.js"></script>
+</head>
+<body data-page="workspace" data-area="workbench">
+  <a class="skip-link" href="#main">跳到内容</a>
+  <div class="workspace">
+    <header class="workspace-header">
+      <a class="brand" href="/workspace.html#workbench">QQ Agent<span>聊天管理</span></a>
+      <nav id="area-switch" class="area-switch" aria-label="管理范围">
+        <a href="#workbench" aria-current="page">聊天工作台</a>
+        <a href="#admin/overview" data-admin hidden>平台管理</a>
+      </nav>
+      <div class="user-actions">
+        <button type="button" data-action="refresh" class="quiet refresh-button">刷新</button>
+        <div class="account-menu">
+          <button type="button" id="account-menu-toggle" class="account-menu-toggle" data-action="toggle-account-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu">
+            <span id="user-label">账号</span><span class="account-menu-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div id="account-menu" class="account-menu-panel" role="menu" aria-label="账号与偏好" hidden>
+            <a href="#account" role="menuitem">账号设置<span>QQ 绑定与登录密码</span></a>
+            <a href="#help" role="menuitem">使用帮助</a>
+            <button type="button" data-action="theme" role="menuitem">切换浅色 / 深色</button>
+            <button type="button" data-action="logout" role="menuitem" class="account-menu-logout">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </header>
+    <aside class="sidebar" aria-label="当前区域导航">
+      <p class="sidebar-caption">聊天工作台</p>
+      <nav id="context-navigation" class="context-navigation" aria-label="工作台功能">
+        <a href="#workbench" aria-current="page">我的聊天</a>
+        <a href="#cost-overview">费用总览</a>
+        <a href="#keys">我的 API 配置</a>
+      </nav>
+      <p class="sidebar-hint">先选择聊天，再管理它的人设、语音与费用。</p>
+    </aside>
+    <div class="workspace-body">
+      <header class="topbar">
+        <div>
+          <nav id="breadcrumb" class="breadcrumb" aria-label="当前位置"><a href="#workbench">聊天工作台</a></nav>
+          <span id="page-kicker">我的聊天</span>
+          <h1 id="page-title">我的聊天</h1>
+        </div>
+      </header>
+      <div id="feedback" role="status" aria-live="polite" hidden></div>
+      <main id="main" tabindex="-1"><div class="loading-state" role="status" aria-live="polite">正在核对账号与聊天权限…</div></main>
+      <footer class="page-footer"><a href="/help.html">使用帮助与数据模型</a><span>费用为估算值，以供应商账单及资源包抵扣为准。</span></footer>
+    </div>
+  </div>
+</body>
+</html>

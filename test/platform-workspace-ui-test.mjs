@@ -9,7 +9,7 @@ test('ordinary workspace buttons save before applying, resume original A/B/A and
  const w=dom.window;w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});w.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:fixture.cookie,origin:fixture.origin}});w.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
  const doc=w.document,input=(id,value)=>{const el=doc.getElementById(id);assert.ok(el,id);el.value=value;el.dispatchEvent(new w.Event('input',{bubbles:true}));},click=selector=>{const el=doc.querySelector(selector);assert.ok(el,selector);assert.equal(el.disabled,false,selector+' enabled');el.click();},submit=selector=>doc.querySelector(selector).dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
  await until(()=>doc.getElementById('persona-form'),'personas loaded');
- assert.equal(doc.querySelector('[data-view="accounts"]').hidden,true);assert.equal(doc.querySelector('[data-admin][href="/console.html"]').hidden,true);
+ assert.equal(doc.querySelector('#area-switch a[href^="#admin/"]:not([hidden])'),null);assert.equal(doc.querySelector('#context-navigation a[href="#admin/accounts"]'),null);
  input('persona-name','好友群的小鲸鱼');input('persona-content','这是 A 版本。用轻松的中文简短回复。');submit('#persona-form');
  await until(()=>doc.getElementById('draft-note')?.textContent.includes('已保存版本'),'A saved');assert.equal(fixture.archives.active('group:789'),null);
  click('[data-action="apply-persona"]');await until(()=>fixture.archives.active('group:789'),'A applied');await until(()=>doc.querySelector('.archive-item.current'),'archive visible');const a=fixture.archives.active('group:789');

@@ -607,25 +607,27 @@ export function updateConfig(patch) {
   // 测试报 invalid API key）。这里在合并前把"patch 条目缺密钥字段"的数组按 id
   // 回填现值；想真清除必须显式传 apiKey: ''（专用清除按钮就是显式空串路径）。
   preserveSanitizedSecrets(getConfig(), cleanObsolete);
-  currentConfig = deepMerge(getConfig(), cleanObsolete);
+  const nextConfig = deepMerge(structuredClone(getConfig()), cleanObsolete);
   // 磁盘上可能已经存过历史遗留的派生标记，一并清掉
-  stripDerivedFlags(currentConfig);
-  stripObsoleteFields(currentConfig);
+  stripDerivedFlags(nextConfig);
+  stripObsoleteFields(nextConfig);
 
   // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
   // 前端只负责上报滑条位置（contextSliderPos），档位和概率一律由这里换算。
   // 这样即使前端算错、或者有人直接调接口只传位置，配置也不会自相矛盾。
-  const posRaw = currentConfig?.store?.contextSliderPos;
+  const posRaw = nextConfig?.store?.contextSliderPos;
   if (posRaw !== undefined && posRaw !== null) {
     const { tier, randomPercent } = sliderToTier(posRaw);
-    currentConfig.store.contextTier = tier;
-    currentConfig.store.randomPercent = randomPercent;
+    nextConfig.store.contextTier = tier;
+    nextConfig.store.randomPercent = randomPercent;
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify(nextConfig, null, 2), {encoding:'utf8',mode:0o600});
+  fs.chmodSync(tmp,0o600);
   fs.renameSync(tmp, CONFIG_FILE);
+  currentConfig = nextConfig;
   return currentConfig;
 }
 
