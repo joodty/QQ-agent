@@ -73,23 +73,28 @@ const money=value=>Number.isFinite(Number(value))?Number(value).toLocaleString('
 const date=value=>value?new Date(value).toLocaleString('zh-CN'):'—';
 const chatIdentityNames=new Map();
 function title(s){
- const key=s?.chatKey||'',name=chatIdentityNames.get(key)||s?.name||s?.chatName||'';
- if(key.startsWith('group:'))return name||'群聊 '+key.slice(6);
+ const key=s?.chatKey||'',name=s?.name||s?.chatName||chatIdentityNames.get(key)||'';
+ if(key.startsWith('group:'))return name?`${name} · 群 ${key.slice(6)}`:'群聊 '+key.slice(6);
  if(key.startsWith('private:')){const own=key==='private:'+(state.auth?.binding?.qq||state.user?.boundQQ||'');return `${name&&name!=='本人私聊'?name:'私聊'} · QQ ${key.slice(8)}${own?'（我的私聊）':''}`;}
  return name||'聊天';
 }
 function titleMarkup(s){return `<span data-chat-title="${esc(s.chatKey)}">${esc(title(s))}</span>`;}
 async function loadChatIdentities(serial){
  const identity=state.user?.id,fingerprint=scopeFingerprint;
- if(!state.scopes.some(row=>row.chatKey.startsWith('private:')))return;
+ if(!state.scopes.some(row=>!row.name||row.chatKey.startsWith('private:')&&row.name==='本人私聊'))return;
+ const current=()=>serial===refreshSerial&&identity===state.user?.id&&fingerprint===scopeFingerprint;
  try{
-  const value=await cachedPrivate('/api/platform/chat-identities'+(state.chatKey?'?chatKey='+encodeURIComponent(state.chatKey):''));
-  if(serial!==refreshSerial||identity!==state.user?.id||fingerprint!==scopeFingerprint)return;
-  for(const row of value.identities||[])if(state.scopes.some(s=>s.chatKey===row.chatKey)&&row.name)chatIdentityNames.set(row.chatKey,row.name);
-  // Update labels only: a late nickname must never replace a settings form,
-  // discard unsaved edits, close an open picker, or change the selected chat.
-  document.querySelectorAll('[data-chat-title]').forEach(el=>{const key=el.dataset.chatTitle;el.textContent=title(state.scopes.find(s=>s.chatKey===key)||{chatKey:key});});
-  if(state.route?.kind==='chat'&&scope()&&$('page-kicker'))$('page-kicker').textContent=title(scope());
+  for(let attempt=0;attempt<3&&current();attempt++){
+   const value=await api('/api/platform/chat-identities'+(state.chatKey?'?chatKey='+encodeURIComponent(state.chatKey):''));
+   if(!current())return;
+   for(const row of value.identities||[]){const visible=state.scopes.find(s=>s.chatKey===row.chatKey);if(visible&&row.name){visible.name=row.name;chatIdentityNames.set(row.chatKey,row.name);}}
+   // Update labels only: late metadata must not replace forms, drafts, the
+   // selected chat or an open voice picker. Both resource kinds share this path.
+   document.querySelectorAll('[data-chat-title]').forEach(el=>{const key=el.dataset.chatTitle;el.textContent=title(state.scopes.find(s=>s.chatKey===key)||{chatKey:key});});
+   if(state.route?.kind==='chat'&&scope()&&$('page-kicker'))$('page-kicker').textContent=title(scope());
+   if(!value.pending||!state.scopes.some(row=>!row.name))break;
+   await new Promise(resolve=>setTimeout(resolve,750));
+  }
  }catch{/* QQ unavailable: keep the exact QQ number and usable settings. */}
 }
 function scope(){return state.scopes.find(x=>x.chatKey===state.chatKey)||null;}

@@ -5,7 +5,7 @@ import {JSDOM} from 'jsdom';
 import {createWorkspaceFixture} from './_platform-workspace-fixture.mjs';
 import {waitFor} from './_harness.mjs';
 
-test('private chat names stay scoped, cached, optional and independent of settings',async t=>{
+test('group and private chat names stay scoped, durable, optional and independent of settings',async t=>{
  let calls=[],fail=false,delay=null;
  const f=await createWorkspaceFixture({onebot:{selfId:'888',async call(action,params){
   calls.push({action,params});if(delay)await delay;if(fail)throw Error('Synthetic QQ unavailable');
@@ -20,18 +20,18 @@ test('private chat names stay scoped, cached, optional and independent of settin
   w.fetch=(route,options={})=>hook?.(route)||fetch(f.origin+route,{...options,headers:{...options.headers,cookie,origin:f.origin}});
   w.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));return {w,d:w.document};
  }
- await t.test('ordinary callers receive only authorized private nicknames; guessing QQ numbers is denied before lookup',async()=>{
+ await t.test('ordinary callers receive only authorized group and private names; guessing QQ numbers is denied before lookup',async()=>{
   assert.equal((await request('','')).status,401);
   const response=await request();assert.equal(response.status,200);
-  assert.deepEqual((await response.json()).identities,[{chatKey:'private:777',name:'好友小明'}]);
+  assert.deepEqual((await response.json()).identities.map(({chatKey,name})=>({chatKey,name})).sort((a,b)=>a.chatKey.localeCompare(b.chatKey)),[{chatKey:'group:789',name:'朋友们的读书和日常闲聊群'},{chatKey:'private:777',name:'好友小明'}]);
   const before=calls.length;await request();assert.equal(calls.length,before,'cache avoids repeated QQ lookups');
   assert.equal((await request('?chatKey=private:999')).status,403);assert.equal(calls.length,before);
   assert.equal((await request('?chatKey=private:777&chatKey=private:999')).status,400);
  });
  await t.test('selected nonfriend is resolved separately, and unavailable QQ falls back to an empty name',async()=>{
-  f.auth.store.grant(f.principal.id,'private:555');f.auth.store.grant(f.principal.id,'private:556');
+  f.auth.store.grant(f.principal.id,'private:555');
   const value=await (await request('?chatKey=private:555')).json();assert.equal(value.identities.find(x=>x.chatKey==='private:555').name,'非好友昵称');
-  fail=true;const unavailable=await request('?chatKey=private:556');assert.equal(unavailable.status,200);assert.equal((await unavailable.json()).identities.find(x=>x.chatKey==='private:556').name,'');fail=false;
+  fail=true;f.auth.store.grant(f.principal.id,'private:556');const unavailable=await request('?chatKey=private:556');assert.equal(unavailable.status,200);assert.equal((await unavailable.json()).identities.find(x=>x.chatKey==='private:556').name,'');fail=false;
  });
  await t.test('slow nickname enrichment keeps QQ fallback, selected chat, unsaved persona text and HTML escaping',async()=>{
   let release;const pending=new Promise(resolve=>{release=resolve;});

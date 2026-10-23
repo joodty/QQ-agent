@@ -1628,23 +1628,9 @@ export function createRoutes(deps) {
 
 /** Public workspace services always receive a server-verified Cookie principal.
  * Native administrator tokens alone cannot impersonate a resource owner. */
-export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, readBody, onebot, orchestrator }) {
+export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, chatIdentities, readBody, onebot, orchestrator }) {
   // Names are display metadata only. Never load message histories to label a
   // chat, or let a slow QQ lookup delay the workspace overview/settings.
-  let friendNames = new Map(), friendsUntil = 0, friendsPending = null;
-  const privateNames = new Map();
-  const qqLookup = async (action, params = {}) => {
-    let timer;
-    try { return await Promise.race([Promise.resolve().then(() => onebot?.call?.(action, params, 2000)), new Promise(resolve => { timer = setTimeout(resolve, 2100); })]); }
-    catch { return null; } finally { clearTimeout(timer); }
-  };
-  const loadFriendNames = () => {
-    if (friendsUntil > Date.now()) return Promise.resolve();
-    return friendsPending ||= qqLookup('get_friend_list').then(rows => {
-      if (Array.isArray(rows)) friendNames = new Map(rows.map(row => [String(row.user_id), String(row.nickname || '').trim().slice(0, 200)]));
-      friendsUntil = Date.now() + (Array.isArray(rows) ? 300000 : 15000);
-    }).finally(() => { friendsPending = null; });
-  };
   const get = (path, work) => ({ method: 'GET', pattern: '/api/platform/' + path, handler: async ctx => {
     const principal = auth.verifyPrincipal(ctx.principal);
     const chatKey = ctx.url.searchParams.get('chatKey');
@@ -1660,22 +1646,18 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     get('chat-identities', async (principal, query) => {
       for (const field of query.keys()) if (field !== 'chatKey') throw Object.assign(Error('聊天查询参数无效'), {statusCode:400});
       if (query.getAll('chatKey').length > 1) throw Object.assign(Error('聊天查询参数无效'), {statusCode:400});
-      await loadFriendNames();
-      const key = query.get('chatKey');
-      if (key?.startsWith('private:') && !friendNames.get(key.slice(8))) {
-        const cached = privateNames.get(key);
-        if (!cached || cached.until < Date.now()) {
-          const info = await qqLookup('get_stranger_info', {user_id:Number(key.slice(8))});
-          const name = String(info?.user_id) === key.slice(8) ? String(info.nickname || '').trim().slice(0, 200) : '';
-          privateNames.set(key, {name, until:Date.now() + (name ? 300000 : 15000)});
-          if (privateNames.size > 1000) privateNames.delete(privateNames.keys().next().value);
-        }
-      }
+      if(!chatIdentities)throw Object.assign(Error('聊天名称索引尚未启用'),{statusCode:503});
+      const key=query.get('chatKey'),before=auth.verifyPrincipal(principal),keys=auth.listScopes(before,{botId:'primary'}).filter(chatKey=>auth.canAccess(before,chatKey,{botId:'primary'}));
+      if(key&&!keys.includes(key))throw Object.assign(Error('没有此聊天权限'),{statusCode:403});
+      const result=await chatIdentities.ready(key?[key,...keys.filter(chatKey=>chatKey!==key)]:keys);
       // QQ may take time: recheck identity/access after it returns, and only
       // expose names belonging to this account's current authorized resources.
-      const fresh = auth.verifyPrincipal(principal);
-      if (key) await auth.ensureAccess(fresh, key, {botId:'primary'});
-      return {identities:auth.listScopes(fresh, {botId:'primary'}).filter(key => key.startsWith('private:')).map(chatKey => ({chatKey, name:friendNames.get(chatKey.slice(8)) || privateNames.get(chatKey)?.name || ''}))};
+      let fresh=auth.verifyPrincipal(principal);
+      if(key){await auth.ensureAccess(fresh,key,{botId:'primary'});fresh=auth.verifyPrincipal(fresh);}
+      const current=auth.listScopes(fresh,{botId:'primary'}).filter(chatKey=>auth.canAccess(fresh,chatKey,{botId:'primary'}));
+      if(key&&!current.includes(key))throw Object.assign(Error('聊天授权已变化，请刷新后重试'),{statusCode:403});
+      const names=new Map(chatIdentities.list(current).map(row=>[row.chatKey,row]));
+      return {identities:current.map(chatKey=>names.get(chatKey)||{chatKey,name:'',source:null,updatedAt:null,lastCheckedAt:null}),pending:result.pending};
     }),
     get('cost-summary',(principal,query)=>{for(const name of query.keys())if(name!=='days')throw Object.assign(Error('费用查询参数无效'),{statusCode:400});if(query.getAll('days').length>1)throw Object.assign(Error('费用查询参数无效'),{statusCode:400});return business.costSummary(principal,{days:query.has('days')?Number(query.get('days')):7});}),
     get('management/overview',(principal,query)=>{for(const name of query.keys())if(name!=='days')throw Object.assign(Error('费用查询参数无效'),{statusCode:400});if(query.getAll('days').length>1)throw Object.assign(Error('费用查询参数无效'),{statusCode:400});return business.managementOverview(principal,{days:query.has('days')?Number(query.get('days')):7});}),
@@ -1685,8 +1667,9 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     get('overview', (principal,query) => {
       if(query.has('summary')&&(query.getAll('summary').length!==1||query.get('summary')!=='1'))throw Object.assign(Error('概览查询参数无效'),{statusCode:400});
       const result = business.overview(principal,{summary:query.get('summary')==='1'});
+      let names=new Map();try{names=new Map((chatIdentities?.list(result.scopes.map(row=>row.chatKey))||[]).map(row=>[row.chatKey,row.name]));}catch{}
       return { ...result, scopes: result.scopes.map(scope => ({ ...scope,
-        name: scope.chatKey.startsWith('group:') ? orchestrator?.chatNameCache?.get(scope.chatKey.slice(6)) || '' : friendNames.get(scope.chatKey.slice(8)) || privateNames.get(scope.chatKey)?.name || ''
+        name: names.get(scope.chatKey)||''
       })), bot: { qq: onebot.selfId || null } };
     }),
     get('personas', (principal, query) => business.personas(principal, query.get('chatKey'))),

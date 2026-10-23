@@ -29,6 +29,7 @@ import { extractCandidateUrls, dispatchMediaLinks } from './media-links.js';
 import { createRoutes } from './routes.js';
 import { createPlatformAuth } from './platform-auth.js';
 import { createPlatformBusiness } from './platform-business.js';
+import {createChatIdentityStore,createChatIdentitySync} from './chat-identities.js';
 import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
 import { createSpeechUsage } from './speech-usage.js';
@@ -674,11 +675,18 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   const reminders = new ReminderStore();
   const videoReader = new VideoReader(onebot);
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit, reminders, videoReader });
+  let chatIdentities=null;
+  const listedResourceKeys=()=>{
+    const current=getConfig(),groups=Array.isArray(current.allow?.groups)?current.allow.groups:[],privateIds=Array.isArray(current.allow?.private)?current.allow.private:[],keys=[...store.listChats(),...groups.map(id=>'group:'+id),...privateIds.map(id=>'private:'+id),...Object.entries(current.productionBudget?.funding||{}).filter(([,value])=>value?.enabled===true).map(([key])=>key)];
+    return [...new Set(keys.filter(key=>/^(group|private):[1-9]\d*$/.test(key)&&Number.isSafeInteger(Number(key.split(':')[1]))))];
+  };
   const platformAuth = platformEnabled ? createPlatformAuth({
     file: cfg.platform?.file || path.join(DATA_DIR, 'platform.sqlite'), publicOrigin: platformOrigin,
-    getConversationKeys: () => store.listChats(),
+    getConversationKeys: listedResourceKeys,
     verifyGroupMember: async ({ groupId, qq }) => {
+      const checkedAt=Date.now();
       const groups = await onebot.call('get_group_list', {});
+      chatIdentities?.observeGroups(groups,{checkedAt});
       for (const group of Array.isArray(groups) ? groups : []) {
         if (group.group_name) orchestrator.chatNameCache.set(String(group.group_id), String(group.group_name));
       }
@@ -687,6 +695,17 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
       return { role: info?.role, user_id: info?.user_id, group_id: info?.group_id, botInGroup: true };
     }
   }) : null;
+  if(platformEnabled){
+    try{
+      const identityStore=createChatIdentityStore({file:path.join(DATA_DIR,'chat-identities.sqlite')});
+      chatIdentities=createChatIdentitySync({store:identityStore,onebot,knownKeys:()=>[...new Set([...platformAuth.store.conversations('primary'),...listedResourceKeys()])],onError:()=>log('[名称] 聊天名称索引暂不可用，现有资料保留')});
+      chatIdentities.seedGroups(orchestrator.chatNameCache);chatIdentities.start();
+    }catch{
+      const unavailable=()=>{throw Object.assign(Error('聊天名称索引暂不可用，现有资料已保留'),{statusCode:503});};
+      chatIdentities={list:unavailable,get:unavailable,ready:async()=>unavailable(),request(){},observeGroups(){},close:async()=>{}};
+      log('[名称] 聊天名称索引暂不可用，现有资料保留');
+    }
+  }
   const platformBusiness = platformEnabled ? createPlatformBusiness({
     file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
     archives, store, orchestrator, auth: platformAuth, config: getConfig
@@ -1391,7 +1410,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
     store, memory, sessions, onebot, orchestrator,
-    platformAuth, platformBusiness,speechService,
+    platformAuth, platformBusiness,speechService,chatIdentities,
     emit, log,
     localVersion, compareSemver, UPDATE_INFO_URL,
     sanitizeConfig, keyEndpointAllowed, sanitizeProvider,
@@ -1773,6 +1792,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     await stickers.close();
     if (groupPermissionTimer) clearInterval(groupPermissionTimer);
     await groupPermissionRefresh;
+    await chatIdentities?.close();
     // 先停掉热重载 watcher：否则 stop() 之后文件变动仍会触发重载 + 广播
     try { pluginWatcher?.close?.(); } catch { /* ignore */ }
     pluginWatcher = null;
@@ -1808,7 +1828,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     releaseInstanceLock();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, speechService, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, speechService, chatIdentities, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
 }
 
 /**
