@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { getConfig } from './config.js';
 import { productionPaidCallGuard,runWithPaidConversation,capturePaidFunding,capturePaidAuthority,assertPaidAuthority } from './paid-call-guard.js';
 import { createTencentSpeechProvider,validateSpeechCredential,quoteSpeechText,validateSpeechVoiceOptions,safeTencentSpeechErrorCode,TENCENT_SPEECH_VOICES,SPEECH_VOICE_LIMITS } from './speech-provider.js';
+import { TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC } from './speech-voices.js';
 
 const APP_ID=0x51535048,SCHEMA=3;
 const key=x=>typeof x==='string'&&/^(group|private):[1-9]\d*$/.test(x)&&Number.isSafeInteger(Number(x.split(':')[1]));
@@ -61,7 +62,7 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
   function credential(){const value=credentials?credentials():readSpeechCredential(config()?.speech?.credentialFile);return value===null||value===undefined?null:validateSpeechCredential(value);}
   function rowFor(chatKey){const row=db.prepare('SELECT * FROM speech_scopes WHERE chat_key=?').get(chatKey);if(row&&(!Number.isSafeInteger(row.version)||row.version<1||![0,1].includes(row.enabled)||row.max_chars!==null&&(!Number.isSafeInteger(row.max_chars)||row.max_chars<1||row.max_chars>150)||row.cooldown_ms!==null&&(!Number.isSafeInteger(row.cooldown_ms)||row.cooldown_ms<1000||row.cooldown_ms>3600000)||row.auto_voice_percent!==null&&!percent(row.auto_voice_percent)||!voiceValid({voiceType:row.voice_type??101001,speed:row.speed??0,volume:row.volume??0})))throw fail('SPEECH_STORAGE_INVALID',503);return row;}
   function subsidy(chatKey){const row=db.prepare('SELECT * FROM speech_subsidies WHERE chat_key=?').get(chatKey);if(!row)return {chatKey,version:0,enabled:false,allowedFundingModes:[],dailyLimitCny:0};const modes=parse(row.modes_json);if(!Number.isSafeInteger(row.version)||row.version<1||![0,1].includes(row.enabled)||!Array.isArray(modes)||new Set(modes).size!==modes.length||modes.some(m=>!['platform','trial','byok'].includes(m))||!Number.isSafeInteger(row.daily_limit_micros)||!money(row.daily_limit_micros/1e6))throw fail('SPEECH_STORAGE_INVALID',503);return {chatKey,version:row.version,enabled:Boolean(row.enabled),allowedFundingModes:modes,dailyLimitCny:row.daily_limit_micros/1e6};}
-  function projection(chatKey){
+  function projection(chatKey,{compact=false}={}){
     if(!key(chatKey))throw fail('SPEECH_SCOPE_INVALID');const p=platform(),row=rowFor(chatKey),grant=subsidy(chatKey);let secret=null,reason='';
     try{secret=credential();}catch{reason='SPEECH_CREDENTIAL_INVALID';}
     let funding;try{funding=capturePaidFunding(chatKey);}catch{reason=reason||'SPEECH_FUNDING_UNAVAILABLE';}
@@ -73,14 +74,14 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     const settings={version:row?.version||0,enabled:Boolean(row?.enabled),maxChars:Math.min(row?.max_chars??p.maxChars,p.maxChars),cooldownMs:Math.max(row?.cooldown_ms??p.cooldownMs,p.cooldownMs),...voice,autoVoicePercent:row?.auto_voice_percent??p.autoVoicePercent,overrides:{voiceType:row?.voice_type??null,speed:row?.speed??null,volume:row?.volume??null,autoVoicePercent:row?.auto_voice_percent??null}};
     const selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voice.voiceType);
     const version=hash([p,settings,grant,secret?hash(secret):null,funding,selectedVoice.category,selectedVoice.rateCnyPer10k]);
-    return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName:selectedVoice.name,category:selectedVoice.category,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,policyVersion:version,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY},secret,funding,version};
+    return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName:selectedVoice.name,category:selectedVoice.category,...(compact?{voiceCatalog:TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC}:{voices:TENCENT_SPEECH_VOICES}),voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,policyVersion:version,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY},secret,funding,version};
   }
   function changed(chatKey){orchestrator?.archiveChanged?.(chatKey);}
   const service={
     runtimePolicy(chatKey){return projection(chatKey).public;},
-    settings(principal,chatKey){scope(principal,chatKey);return projection(chatKey).public;},
-    overview(principal){const p=fresh(principal);return {platform:service.platformOverview(p,{publicOnly:true}),conversations:auth.listScopes(p,{botId:'primary'}).map(k=>projection(k).public)};},
-    platformOverview(principal,{publicOnly=false}={}){const p=fresh(principal),settings=platform(),selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===settings.voiceType);let configured=false;try{configured=Boolean(credential());}catch{}return {...settings,configured,provider:'tencent',voiceName:selectedVoice.name,category:selectedVoice.category,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY,...(p.role==='admin'&&!publicOnly?{subsidies:db.prepare('SELECT chat_key FROM speech_subsidies ORDER BY chat_key').all().map(r=>subsidy(r.chat_key))}:{})};},
+    settings(principal,chatKey,{compact=false}={}){scope(principal,chatKey);return projection(chatKey,{compact}).public;},
+    overview(principal,{compact=false}={}){const p=fresh(principal);if(compact)return {platform:service.platformOverview(p,{publicOnly:true,compact:true})};return {platform:service.platformOverview(p,{publicOnly:true}),conversations:auth.listScopes(p,{botId:'primary'}).map(k=>projection(k).public)};},
+    platformOverview(principal,{publicOnly=false,compact=false}={}){const p=fresh(principal),settings=platform(),selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===settings.voiceType);let configured=false;try{configured=Boolean(credential());}catch{}return {...settings,configured,provider:'tencent',voiceName:selectedVoice.name,category:selectedVoice.category,...(compact?{voiceCatalog:TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC}:{voices:TENCENT_SPEECH_VOICES}),voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY,...(p.role==='admin'&&!publicOnly?{subsidies:db.prepare('SELECT chat_key FROM speech_subsidies ORDER BY chat_key').all().map(r=>subsidy(r.chat_key))}:{})};},
     updateSettings(principal,fields){
       if(!exact(fields,['chatKey','expectedVersion','enabled','maxChars','cooldownMs','voiceType','speed','volume','autoVoicePercent']))throw fail('SPEECH_SETTINGS_INVALID',400);
       scope(principal,fields.chatKey,true);

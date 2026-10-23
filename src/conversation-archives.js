@@ -336,6 +336,18 @@ export class ConversationArchives {
       return { chatKey, sourceId: row.source_id, archiveId: row.archive_id, selectionVersion: row.selection_version, persona: { id: row.persona_id, name: row.name, content: row.content, version: row.persona_version } };
     });
   }
+  // Navigation needs the selected identity, never its prompt or history body.
+  // Keep this independent from list pagination and from active() runtime reads.
+  activeSummary(chatKey) {
+    if (!key(chatKey)) throw problem('会话标识无效');
+    return this._fastRead(db => {
+      if (!db) return null;
+      const row=db.prepare('SELECT s.archive_id,s.version selection_version,a.source_id,a.persona_id,a.continuation,p.name,p.version persona_version FROM archive_selections s LEFT JOIN conversation_archives a ON a.bot_id=s.bot_id AND a.id=s.archive_id AND a.chat_key=s.chat_key LEFT JOIN archive_personas p ON p.bot_id=a.bot_id AND p.id=a.persona_id WHERE s.bot_id=? AND s.chat_key=?').get(this.botId,chatKey);
+      if(!row)return null;
+      if(!id(row.archive_id)||!id(row.source_id)||!id(row.persona_id)||row.continuation!=='ready'||!text(row.name,200,true)||!Number.isSafeInteger(row.selection_version)||row.selection_version<1||!Number.isSafeInteger(row.persona_version)||row.persona_version<1)throw problem('当前档案元数据损坏',503);
+      return {chatKey,sourceId:row.source_id,archiveId:row.archive_id,selectionVersion:row.selection_version,persona:{id:row.persona_id,name:row.name,version:row.persona_version}};
+    });
+  }
   select(chatKey, archiveId, { expectedVersion } = {}) {
     if (!key(chatKey) || !id(archiveId) || expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0)) throw problem('档案选择或版本无效');
     return this._fastWrite(db => {

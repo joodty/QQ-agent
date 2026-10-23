@@ -96,15 +96,17 @@ export class ChatStore {
   }
 
   listChats() {
-    // 从磁盘文件名还原（group_123.json -> group:123），已加载的直接带上
+    // Enumerate identities only. Loading #state here would parse every legacy
+    // message file or selected archive merely to render a conversation list.
+    const diskKeys=[];
     try {
       const files = fs.readdirSync(MESSAGES_DIR).filter((f) => /^(group|private)_\d+\.json$/.test(f));
       for (const f of files) {
         const m = /^(group|private)_(\d+)\.json$/.exec(f);
-        if (m) this.#state(`${m[1]}:${m[2]}`);
+        if (m) diskKeys.push(`${m[1]}:${m[2]}`);
       }
     } catch { /* 目录不存在 */ }
-    return [...new Set([...this.chats.keys(), ...(this.archives?.listChats() ?? [])])];
+    return [...new Set([...this.chats.keys(), ...diskKeys, ...(this.archives?.listChats() ?? [])])];
   }
 
   getChatMeta(chatKey) {

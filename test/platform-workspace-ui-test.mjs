@@ -6,7 +6,7 @@ test('ordinary workspace buttons save before applying, resume original A/B/A and
  const fixture=await createWorkspaceFixture();t.after(()=>fixture.close());
  const errors=[],console=new VirtualConsole();console.on('jsdomError',e=>errors.push(e.message));
  const dom=new JSDOM(fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),{url:fixture.origin+'/workspace.html#chats',runScripts:'outside-only',virtualConsole:console});t.after(()=>dom.window.close());
- const w=dom.window;w.matchMedia=()=>({matches:false});w.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:fixture.cookie,origin:fixture.origin}});w.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
+ const w=dom.window;w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});w.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:fixture.cookie,origin:fixture.origin}});w.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
  const doc=w.document,input=(id,value)=>{const el=doc.getElementById(id);assert.ok(el,id);el.value=value;el.dispatchEvent(new w.Event('input',{bubbles:true}));},click=selector=>{const el=doc.querySelector(selector);assert.ok(el,selector);assert.equal(el.disabled,false,selector+' enabled');el.click();},submit=selector=>doc.querySelector(selector).dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
  await until(()=>doc.getElementById('persona-form'),'personas loaded');
  assert.equal(doc.querySelector('[data-view="accounts"]').hidden,true);assert.equal(doc.querySelector('[data-admin][href="/console.html"]').hidden,true);
@@ -36,12 +36,12 @@ test('ordinary workspace buttons save before applying, resume original A/B/A and
  assert.equal(w.localStorage.getItem('fixture-personal-ui-key'),null);assert.ok(![...Array(w.localStorage.length)].some((_,i)=>String(w.localStorage.getItem(w.localStorage.key(i))).includes('fixture-personal-ui-key')));
  const adminLogin=await fixture.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'}),adminCookie=fixture.auth.cookie(adminLogin.token).split(';')[0];
  const adminDom=new JSDOM(fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),{url:fixture.origin+'/workspace.html#costs',runScripts:'outside-only',virtualConsole:console});t.after(()=>adminDom.window.close());
- const aw=adminDom.window;aw.matchMedia=()=>({matches:false});aw.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:adminCookie,origin:fixture.origin}});aw.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
+ const aw=adminDom.window;aw.AbortController=globalThis.AbortController;aw.matchMedia=()=>({matches:false});aw.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:adminCookie,origin:fixture.origin}});aw.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
  await until(()=>aw.document.getElementById('chat-limit'),'admin limit form');aw.document.getElementById('chat-limit').value='.75';aw.document.querySelector('form[data-action="save-budget"]').dispatchEvent(new aw.Event('submit',{bubbles:true,cancelable:true}));
  await until(()=>fixture.business.overview(fixture.principal).scopes.find(s=>s.chatKey==='group:789').budget.dailyLimitCny===.75,'admin UI limit reaches shared guard');
  const emptyRegistration=await fixture.auth.register({username:'fixture_empty_ui',password:'fixture-empty-ui-pass-2026'}),emptyCookie=fixture.auth.cookie(emptyRegistration.token).split(';')[0];
  const emptyDom=new JSDOM(fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),{url:fixture.origin+'/workspace.html',runScripts:'outside-only',virtualConsole:console});t.after(()=>emptyDom.window.close());
- const ew=emptyDom.window;ew.matchMedia=()=>({matches:false});ew.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:emptyCookie,origin:fixture.origin}});ew.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
+ const ew=emptyDom.window;ew.AbortController=globalThis.AbortController;ew.matchMedia=()=>({matches:false});ew.fetch=(route,opts={})=>fetch(fixture.origin+route,{...opts,headers:{...opts.headers,cookie:emptyCookie,origin:fixture.origin}});ew.eval(fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8'));
  await until(()=>emptyDom.window.document.querySelector('.empty-state h2')?.textContent==='先验证本人 QQ','unbound new-user next step');
  assert.ok(!fixture.calls.some(x=>/test-chat|chat\/completions|vision\/scan/.test(x.path)));
  assert.deepEqual(errors,[]);

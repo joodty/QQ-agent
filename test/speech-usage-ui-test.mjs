@@ -31,7 +31,7 @@ test('speech usage renders real authorized HTTP statistics without changing sett
   let usageFailure = false;
   async function mount(cookie) {
     const dom = new JSDOM(html,{url:f.origin+'/workspace.html#speech',runScripts:'outside-only',virtualConsole:console}); t.after(()=>dom.window.close());
-    const w = dom.window; w.matchMedia=()=>({matches:false});
+    const w = dom.window; w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});
     w.fetch=(route,options={})=>usageFailure&&String(route).startsWith('/api/platform/speech/usage')
       ? Promise.resolve(new Response(JSON.stringify({error:'用量读取暂时失败'}),{status:503,headers:{'content-type':'application/json'}}))
       : fetch(f.origin+route,{...options,headers:{...options.headers,cookie,origin:f.origin}});

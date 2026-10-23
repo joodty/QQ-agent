@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import {catalogueAsset} from '../src/http-public-assets.js';
 
 /** Real local auth/business HTTP for DOM/browser tests. Every identity and Key is synthetic. */
 export async function createWorkspaceFixture({empty=false,admin=false,speechCredentials=undefined}={}){
@@ -13,6 +14,7 @@ export async function createWorkspaceFixture({empty=false,admin=false,speechCred
  const calls=[];const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://127.0.0.1');
   try{
+   if(catalogueAsset(req,res,url))return;
    if(url.pathname.startsWith('/api/')){
     calls.push({method:req.method,path:url.pathname});
     if(await auth.handleHttp(req,res,url))return;

@@ -33,6 +33,7 @@ import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
 import { createSpeechUsage } from './speech-usage.js';
 import { TENCENT_SPEECH_SAMPLE_ORIGINS } from './speech-voices.js';
+import {catalogueAsset,etagMatches,matchingAssetVersion,publicAssetHeaders,versionWorkspaceHtml} from './http-public-assets.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -1409,6 +1410,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
+    if(catalogueAsset(req,res,url))return;
 
     // Cloud accounts have their own Cookie/RBAC boundary. A browser-supplied
     // console header is replaced by the gateway; the engine requires its exact
@@ -1497,7 +1499,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
 
 
     // 静态 UI
-    if (req.method === 'GET') {
+    if (req.method === 'GET' || req.method === 'HEAD') {
       // 路径穿越防护：
       // 旧实现 file.replace(/\.\./g,'') 只删字面 ".." —— "/....//" 删完仍还原出 ".."，
       // 且 startsWith 校验在 path.join 之后做（顺序颠倒），形同虚设。
@@ -1535,12 +1537,15 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
         return;
       }
       try {
-        const data = fs.readFileSync(fullPath);
+        let data = fs.readFileSync(fullPath);
         const ext = path.extname(fullPath);
         // jpg/jpeg/webp/gif/ico：设置页群二维码彩蛋（group-qrcode.jpg）与
         // 市场页图片要用 —— 曾经只认 png/svg，jpg 会以 octet-stream 下载而非显示
         const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon', '.json': 'application/json; charset=utf-8' };
-        const headers = { 'content-type': types[ext] ?? 'application/octet-stream', 'cache-control': 'no-cache' };
+        if(ext==='.html')data=versionWorkspaceHtml(data,UI_DIR);
+        const versioned=['.js','.css'].includes(ext)&&matchingAssetVersion(url,data);
+        if(['.js','.css'].includes(ext)&&url.searchParams.has('v')&&!versioned){res.writeHead(404,{'cache-control':'no-cache'});res.end();return;}
+        const headers = { 'content-type': types[ext] ?? 'application/octet-stream', ...publicAssetHeaders(data,{immutable:versioned}) };
         if (ext === '.html') {
           // CSP 用 HTTP 头再声明一次：header 里的 frame-ancestors 才生效
           // （meta 版本会被浏览器忽略该指令），同时给不解析 meta 的场景兜底。
@@ -1568,8 +1573,9 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
           headers['x-content-type-options'] = 'nosniff';
           headers['referrer-policy'] = 'no-referrer';
         }
+        if(etagMatches(req.headers['if-none-match'],headers.etag)){delete headers['content-length'];res.writeHead(304,headers);res.end();return;}
         res.writeHead(200, headers);
-        res.end(data);
+        res.end(req.method==='HEAD'?undefined:data);
         return;
       } catch {
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });

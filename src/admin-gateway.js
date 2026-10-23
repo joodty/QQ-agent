@@ -2,11 +2,12 @@
 // resource APIs verify the same local account store and exact conversation scope.
 import http from 'node:http';
 import { createPlatformAuth } from './platform-auth.js';
+import {isPublicAssetPath} from './http-public-assets.js';
+import {relayHttpResponse} from './http-response-compression.js';
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
-const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'etag', 'last-modified', 'content-encoding', 'content-security-policy']);
-const PUBLIC_STATIC = new Set(['/login.html', '/workspace.html', '/platform.js', '/platform.css', '/help.html', '/favicon.ico']);
+const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'content-encoding', 'content-security-policy']);
 const CONFIG_FIELDS = new Set(['api', 'providers', 'dshProviderKeys', 'persona', 'personaByChat', 'personaUnified',
   'allow', 'deny', 'allowAllWhenEmpty', 'store', 'send', 'memory', 'groupSliderPos', 'unifiedTier', 'chatActive',
   'webSearch', 'proactive', 'tools', 'memberNotes', 'ui', 'peakSchedule', 'security', 'wakeDelayMs', 'drainDelayMs',
@@ -122,7 +123,7 @@ export function createAdminGateway({ publicOrigin, platformAuth, platformFile,
     // Only the application owns its existing OneBot connection. A group claim
     // must reach that trusted verifier instead of a second gateway-only auth instance.
     if (url.pathname !== '/api/platform/groups/claim' && await accounts.handleHttp?.(req, res, url)) return;
-    const isPublicStatic = ['GET', 'HEAD'].includes(req.method) && PUBLIC_STATIC.has(url.pathname);
+    const isPublicStatic = ['GET', 'HEAD'].includes(req.method) && isPublicAssetPath(url.pathname);
     const isPlatformApi = url.pathname.startsWith('/api/platform/');
     const cookie = String(req.headers.cookie || '');
     if (!isPublicStatic) {
@@ -142,15 +143,22 @@ export function createAdminGateway({ publicOrigin, platformAuth, platformFile,
     const headers = { host: isPlatformApi ? publicUrl.host : targetUrl.host, origin: isPlatformApi ? publicUrl.origin : targetUrl.origin, 'x-console-token': consoleToken,
       accept: String(req.headers.accept || '*/*') };
     if (isPlatformApi) headers.cookie = cookie;
+    if(isPublicStatic&&typeof req.headers['if-none-match']==='string'&&req.headers['if-none-match'].length<=8192)headers['if-none-match']=req.headers['if-none-match'];
     if (buffer) { headers['content-type'] = 'application/json'; headers['content-length'] = String(buffer.length); }
     if (url.pathname === '/console.html') url.pathname = '/index.html';
     const upstream = http.request(new URL(url.pathname + url.search, targetUrl), { method: req.method, headers }, response => {
       const outgoing = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
         'x-qq-agent-console-mode': 'restricted-admin' };
       for (const [key, value] of Object.entries(response.headers)) if (RESPONSE_HEADERS.has(key) && value !== undefined) outgoing[key] = value;
+      if(isPublicStatic&&!response.headers['set-cookie']&&[200,304].includes(response.statusCode)){
+        const caching=response.headers['cache-control'];
+        const immutablePath=/^\/assets\/speech-voices\.[a-f0-9]{64}\.json$/.test(url.pathname)
+          || /^\/platform\.(?:js|css)$/.test(url.pathname)&&[...url.searchParams].length===1&&/^[a-f0-9]{64}$/.test(url.searchParams.get('v')||'');
+        if(caching==='no-cache'||caching==='public, max-age=31536000, immutable')outgoing['cache-control']=caching.includes('immutable')&&!immutablePath?'no-cache':caching;
+        for(const key of ['etag','last-modified','vary'])if(typeof response.headers[key]==='string')outgoing[key]=response.headers[key];
+      }
       if (isPlatformApi && response.headers['set-cookie']) outgoing['set-cookie'] = response.headers['set-cookie'];
       const isSse = String(response.headers['content-type'] || '').startsWith('text/event-stream');
-      res.writeHead(response.statusCode || 502, outgoing);
       let timer = null, checking = false;
       const cleanup = () => { if (timer) clearInterval(timer); };
       if (isSse) {
@@ -167,7 +175,7 @@ export function createAdminGateway({ publicOrigin, platformAuth, platformFile,
       response.on('error', () => { cleanup(); res.destroy(); });
       response.on('close', cleanup);
       res.on('close', () => { cleanup(); response.destroy(); upstream.destroy(); });
-      response.pipe(res);
+      relayHttpResponse(req,res,response,outgoing);
     });
     active.add(upstream);
     // A preview can still be synthesizing before the first response headers.

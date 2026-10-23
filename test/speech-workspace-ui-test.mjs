@@ -13,7 +13,7 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
  const html=fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),script=fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8');
  async function mount(cookie){
   const dom=new JSDOM(html,{url:f.origin+'/workspace.html#speech',runScripts:'outside-only',virtualConsole:console});t.after(()=>dom.window.close());
-  const w=dom.window;w.matchMedia=()=>({matches:false});w.fetch=(route,options={})=>fetch(f.origin+route,{...options,headers:{...options.headers,cookie,origin:f.origin}});w.eval(script);
+  const w=dom.window;w.AbortController=globalThis.AbortController;w.matchMedia=()=>({matches:false});w.fetch=(route,options={})=>fetch(f.origin+route,{...options,headers:{...options.headers,cookie,origin:f.origin}});w.eval(script);
   await waitFor(()=>w.document.querySelector('form[data-action="save-speech-settings"]'),5000,'voice page hydrated');return w;
  }
  const user=await mount(f.cookie);

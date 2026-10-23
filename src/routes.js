@@ -1641,8 +1641,9 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     return ctx.json(ctx.res, 200, await work(principal, input));
   }});
   return [
-    get('overview', principal => {
-      const result = business.overview(principal);
+    get('overview', (principal,query) => {
+      if(query.has('summary')&&(query.getAll('summary').length!==1||query.get('summary')!=='1'))throw Object.assign(Error('概览查询参数无效'),{statusCode:400});
+      const result = business.overview(principal,{summary:query.get('summary')==='1'});
       return { ...result, scopes: result.scopes.map(scope => ({ ...scope,
         name: scope.chatKey.startsWith('group:') ? orchestrator?.chatNameCache?.get(scope.chatKey.slice(6)) || '' : '本人私聊'
       })), bot: { qq: onebot.selfId || null } };

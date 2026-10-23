@@ -6,6 +6,11 @@ function publicProjection(value) {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'reason' && typeof item === 'string' && item.startsWith('SPEECH_') ? speechErrorMessage(item) : publicProjection(item)]));
 }
 export function createSpeechRoutes({ service, usage, auth, readBody }) {
+  const compact = ctx => {
+    const values=ctx.url.searchParams.getAll('compact');
+    if(values.length&&(values.length!==1||values[0]!=='1'))throw Object.assign(Error('语音查询参数无效'),{statusCode:400});
+    return values.length===1;
+  };
   const access = async (principal, chatKey, write = false) => {
     if (!chatKey) throw Object.assign(Error('请先选择群聊或私聊'), { statusCode: 400 });
     await auth.ensureAccess(principal, chatKey, { botId: 'primary', write });
@@ -29,8 +34,8 @@ export function createSpeechRoutes({ service, usage, auth, readBody }) {
       }
       return usage.usage(principal, fields);
     }),
-    route('GET', 'overview', principal => service.overview(principal)),
-    route('GET', 'settings', async (principal, ctx) => { const key = ctx.url.searchParams.get('chatKey'); await access(principal, key); return service.settings(principal, key); }),
+    route('GET', 'overview', (principal,ctx) => service.overview(principal,{compact:compact(ctx)})),
+    route('GET', 'settings', async (principal, ctx) => { const key = ctx.url.searchParams.get('chatKey'); await access(principal, key); return service.settings(principal, key,{compact:compact(ctx)}); }),
     route('POST', 'preview', async (principal, ctx) => {
       const controller=new AbortController(),cancel=()=>controller.abort(),disconnected=()=>{if(!ctx.res.writableEnded)cancel();};
       ctx.req.once('aborted',cancel);ctx.res.once('close',disconnected);

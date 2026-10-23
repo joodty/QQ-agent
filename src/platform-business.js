@@ -82,7 +82,19 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
   }
   const service={
     runtimeAllowed(chatKey){try{const source=resolveFunding(chatKey),p=validateProductionBudgetConfig(config());return Boolean(source&&!source.blocked||!source&&p.funding[chatKey]?.mode==='platform'&&p.funding[chatKey]?.enabled);}catch{return false;}},
-    overview(principal){const p=fresh(principal),keys=auth.listScopes(p,{botId:'primary'}),guard=productionPaidCallGuard();return {role:p.role,providers:providers().map(({endpoint,model,prices})=>({endpoint,model,prices,currency:'CNY'})),scopes:keys.map(chatKey=>({chatKey,kind:chatKey.split(':')[0],selected:archives.active(chatKey),archives:archives.list(chatKey),personaOptions:visiblePersonas(p,chatKey),budget:guard.status(chatKey),funding:effectiveFunding(chatKey)}))};},
+    overview(principal,{summary=false}={}){
+      const p=fresh(principal),keys=auth.listScopes(p,{botId:'primary'}),guard=productionPaidCallGuard();
+      return {role:p.role,providers:providers().map(({endpoint,model,prices})=>({endpoint,model,prices,currency:'CNY'})),
+        ...(summary?{accountId:p.id,credentialCount:db.prepare('SELECT COUNT(*) count FROM business_credentials WHERE owner_id=?').get(p.id).count}:{}),
+        scopes:keys.map(chatKey=>{
+          const archiveList=archives.list(chatKey);
+          // list() reads indexed metadata only. A home-page summary must not
+          // load every selected persona body or enumerate all visible cards.
+          const selected=summary?archives.activeSummary(chatKey):archives.active(chatKey);
+          return {chatKey,kind:chatKey.split(':')[0],selected,archives:archiveList,
+            ...(summary?{}:{personaOptions:visiblePersonas(p,chatKey)}),budget:guard.status(chatKey),funding:effectiveFunding(chatKey)};
+        })};
+    },
     personas(principal,chatKey){return {personas:visiblePersonas(principal,chatKey)};},
     createPersona(principal,fields){if(!exact(fields,['chatKey','name','content']))throw fail('人设字段无效');const p=scope(principal,fields.chatKey,true);const v=archives.createPersona({name:fields.name,content:fields.content});db.prepare('INSERT INTO business_personas VALUES(?,?,?,?,?,0)').run(v.id,p.id,fields.chatKey,null,1);return {persona:{...v,editable:true,historyCount:0}};},
     updatePersona(principal,fields){if(!exact(fields,['chatKey','id','expectedVersion','name','content']))throw fail('人设字段无效');const p=scope(principal,fields.chatKey,true),before=visiblePersonas(p,fields.chatKey).find(v=>v.id===fields.id);if(!before)throw fail('人设不可见',404);if(!before.editable)throw fail('请复制他人的角色后编辑',403);if(before.version!==fields.expectedVersion||db.prepare('SELECT 1 FROM business_personas WHERE origin_id=?').get(fields.id))throw fail('已有新版本，请刷新后基于最新版本编辑',409);const next=archives.createPersona({name:fields.name??before.name,content:fields.content??before.content,version:before.version+1,history:[{kind:'qq-agent-persona-revision',version:before.version,name:before.name,content:before.content}]});db.prepare('INSERT INTO business_personas VALUES(?,?,?,?,?,0)').run(next.id,(db.prepare('SELECT owner_id FROM business_personas WHERE id=?').get(fields.id)?.owner_id||p.id),fields.chatKey,fields.id,before.version+1);return {persona:{...next,editable:true,originId:fields.id},previousPersonaId:fields.id};},
