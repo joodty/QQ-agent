@@ -32,27 +32,42 @@ function note(ctx, type, text) {
   } catch { /* The QQ result remains authoritative if a UI listener fails. */ }
 }
 function replyState(ctx) { return ctx.speechReplyState ||= { decided: false, selected: false, attempted: false, deliveryUnknown: false, spokenText: null }; }
+function audit(ctx, fields) {
+  // Diagnostic metadata only: never persist the spoken text, prompt, audio,
+  // credential or provider response. Normal session persistence saves this.
+  if (ctx.session) ctx.session.speechDecision = { ...ctx.session.speechDecision, ...fields };
+}
 function declined(ctx) { return (ctx.triggerEntries || []).some(entry => !entry.self && /(?:不要|不用|别|无需|禁止).{0,4}(?:语音|朗读|读出来)/u.test(String(entry.text || ''))); }
 function eligible(text, policy) {
   return text.length > 0 && text.length <= policy.settings.maxChars && /[\p{L}\p{N}]/u.test(text)
     && !/https?:\/\/|www\.|```|[<>]|\[CQ:/i.test(text);
 }
-async function deliverSpeech(ctx, text, { automatic = false } = {}) {
+async function deliverSpeech(ctx, text, { automatic = false, options = {} } = {}) {
   const state = replyState(ctx), service = ctx.speech;
+  const assertReplyCurrent = () => {
+    current(ctx);
+    if (options.guard !== undefined) {
+      if (typeof options.guard !== 'function') throw Object.assign(Error('语音发送条件无效'), { code: 'SPEECH_AUTHORIZATION_CHANGED' });
+      const allowed = options.guard();
+      if (allowed === false || allowed?.then) throw Object.assign(Error('语音发送条件已变化'), { code: 'SPEECH_AUTHORIZATION_CHANGED' });
+    }
+  };
+  assertReplyCurrent();
   if (state.deliveryUnknown) throw Object.assign(Error('上一条语音交付未确认，本轮不自动重复发送。'), { code: 'SPEECH_DELIVERY_UNKNOWN' });
   if (state.spokenText === text) return { sent: [], failed: [], duplicate: true };
   state.decided = true; state.attempted = true;
   let sending = false;
   try {
-    current(ctx);
+    assertReplyCurrent();
     const policy = service.runtimePolicy(ctx.chatKey);
     if (!policy.allowed) throw Object.assign(Error(speechErrorMessage(policy.reason)), { code: policy.reason || 'SPEECH_DISABLED' });
+    audit(ctx, { status: 'synthesizing', automatic, characters: text.length, quotedReply: Boolean(options.replyToMessageId) });
     const built = await service.synthesize(ctx.chatKey, {
       text, operationId: `${ctx.session?.id || 'chat'}:${ctx.toolCallId || 'speech'}`,
       signal: ctx.abortSignal, direct: !automatic,
       ...(automatic ? { purpose: 'automatic', automaticSelected: true } : {})
     });
-    const guard = () => { current(ctx); service.assertCurrent(built.receipt); };
+    const guard = () => { assertReplyCurrent(); service.assertCurrent(built.receipt); };
     guard();
     if (!Buffer.isBuffer(built.audio) || !built.audio.length) throw Object.assign(Error('语音内容无效'), { code: 'SPEECH_AUDIO_INVALID' });
     sending = true;
@@ -60,21 +75,24 @@ async function deliverSpeech(ctx, text, { automatic = false } = {}) {
       label: `[语音] ${built.transcript || text}`, dedupeKey: `speech:${ctx.session?.id || 'chat'}:${ctx.toolCallId || text}`, guard
     });
     state.spokenText = built.transcript || text;
+    audit(ctx, { status: 'sent', reason: 'voice_sent' });
     return { sent: [{ text: state.spokenText, kind: 'voice', messageId: result?.message_id ?? null, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }], failed: [] };
   } catch (error) {
     if (sending) {
       state.deliveryUnknown = true;
+      audit(ctx, { status: 'delivery_unknown', reason: 'send_unconfirmed' });
       throw Object.assign(Error('本次语音发送未能确认，请勿自动重复发送。'), { code: 'SPEECH_DELIVERY_UNKNOWN' });
     }
-    current(ctx);
+    assertReplyCurrent();
     const policy = service.runtimePolicy(ctx.chatKey);
     if (/CHANGED|REVOK|DISABL|CANCEL|ABORT|UNAUTH|PERMISSION|ACCESS_DENIED|STALE/.test(String(error.code || '')) || !policy.allowed) throw error;
     const guard = () => {
-      current(ctx); const latest = service.runtimePolicy(ctx.chatKey);
+      assertReplyCurrent(); const latest = service.runtimePolicy(ctx.chatKey);
       if (!latest.allowed || latest.policyVersion !== policy.policyVersion) throw Object.assign(Error('语音设置已变化'), { code: 'SPEECH_AUTHORIZATION_CHANGED' });
     };
     guard();
-    return ctx.sender.sendTextBatch(ctx.chatKey, [text], { guard });
+    audit(ctx, { status: 'text_fallback', reason: /^SPEECH_[A-Z_]+$/.test(error.code || '') ? error.code : 'synthesis_unavailable' });
+    return ctx.sender.sendTextBatch(ctx.chatKey, [text], { ...options, guard });
   }
 }
 
@@ -88,16 +106,30 @@ export function createSpeechReplySender(ctx, { random = Math.random } = {}) {
     if (state.deliveryUnknown) throw Object.assign(Error('语音交付未确认，本轮不自动重复发送。'), { code: 'SPEECH_DELIVERY_UNKNOWN' });
     if (state.spokenText === text) return { sent: [], failed: [], duplicate: true };
     const plain = () => ctx.sender.sendTextBatch(ctx.chatKey, messages, { ...options, guard() { current(ctx); return options.guard?.(); } });
-    if (!ctx.speech || ctx.proactive || declined(ctx) || options.replyToMessageId || options.atUserId) return plain();
+    if (!ctx.speech || ctx.proactive || declined(ctx) || options.atUserId) {
+      audit(ctx, { status: 'skipped', reason: !ctx.speech ? 'unavailable' : ctx.proactive ? 'proactive' : declined(ctx) ? 'declined' : 'addressed_text' });
+      return plain();
+    }
+    // A quote is ordinary chat context, not a reason to suppress speech. Voice
+    // uses a standalone record bubble; the text path retains the original quote.
     current(ctx);
     let policy;
     try {
       policy = ctx.speech.runtimePolicy(ctx.chatKey);
-      if (!eligible(text, policy)) return plain();
+      if (!eligible(text, policy)) {
+        audit(ctx, { status: 'skipped', reason: text.length > policy.settings.maxChars ? 'text_too_long' : 'unsuitable_text', characters: text.length });
+        return plain();
+      }
     } catch {
       // Optional speech must not make an otherwise authorized text reply fail.
       // Consume the automatic decision; a later tool call cannot keep retrying it.
       state.decided = true;
+      audit(ctx, { status: 'skipped', reason: 'policy_unavailable' });
+      return plain();
+    }
+    if (!policy.allowed) {
+      state.decided = true;
+      audit(ctx, { status: 'skipped', reason: /^SPEECH_[A-Z_]+$/.test(policy.reason || '') ? policy.reason : 'policy_disabled' });
       return plain();
     }
     const requested = speechWasRequested(ctx.triggerEntries);
@@ -107,12 +139,12 @@ export function createSpeechReplySender(ctx, { random = Math.random } = {}) {
       const percent = policy.settings.autoVoicePercent || 0;
       const roll = random();
       state.selected = Number.isFinite(roll) && roll >= 0 && roll < 1 && roll < percent / 100;
+      audit(ctx, { probability: percent, roll: Number.isFinite(roll) && roll >= 0 && roll < 1 ? roll : null, status: state.selected ? 'selected' : 'skipped', reason: state.selected ? 'probability_hit' : 'random_miss', quotedReply: Boolean(options.replyToMessageId) });
       if (!state.selected) return plain();
     }
     // A selected reply consumes this run's single decision even if dependency,
     // cooldown or budget admission denies speech. No repeated coin tossing.
-    if (!policy.allowed) return plain();
-    return deliverSpeech(ctx, text, { automatic: !requested });
+    return deliverSpeech(ctx, text, { automatic: !requested, options });
   };
 }
 export const speechToolDefinition = {

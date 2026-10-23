@@ -52,8 +52,8 @@ test('Tencent speech uses one scoped Agent for group/private and platform/BYOK w
  }
  const own=app.platformBusiness.saveCredential(principal,{name:'Fixture own model',endpoint:'https://api.deepseek.com',model:'deepseek-flash',apiKey:'fixture-byok-model-key',enabled:true}).credential;
  let mid=10000;
- async function run(key,text,{voice=true,requested=true,split=false}={}){
-  const index=llm.state.requests.length;llm.state.script[index]={model:'deepseek-flash',toolCalls:[{name:voice?'send_voice':'send_message',args:voice?{text}:{messages:split?[text,'第二个短句。']:[text]}}]};llm.state.script[index+1]={model:'deepseek-flash',content:'done'};
+ async function run(key,text,{voice=true,requested=true,split=false,quoted=false}={}){
+  const index=llm.state.requests.length;llm.state.script[index]={model:'deepseek-flash',toolCalls:[{name:voice?'send_voice':'send_message',args:voice?{text}:{messages:split?[text,'第二个短句。']:[text],...(quoted?{replyToMessageId:mid}:{})}}]};llm.state.script[index+1]={model:'deepseek-flash',content:'done'};
   const [kind,id]=key.split(':');ws.push({post_type:'message',message_type:kind,...(kind==='group'?{group_id:Number(id)}:{}),user_id:456,self_id:888,message_id:++mid,time:Math.floor(Date.now()/1000),sender:{user_id:456,nickname:'Fixture caller'},message:[...(kind==='group'?[{type:'at',data:{qq:'888'}}]:[]),{type:'text',data:{text:(requested?'请用语音回复我 ':'晚上好 ')+mid}}]});
   await waitFor(()=>llm.state.requests.length>=index+2&&!app.orchestrator.runningChats.size,10000,'Agent speech turn completed');return llm.state.requests.slice(index,index+2);
  }
@@ -76,8 +76,9 @@ test('Tencent speech uses one scoped Agent for group/private and platform/BYOK w
    for(const mode of ['platform','byok']){
     if(mode==='byok')app.platformBusiness.setFunding(principal,{chatKey:key,mode:'byok',credentialRef:own.id,expectedVersion:2});
     const before=speechCalls.length,sends=onebot.state.sends.length;
-    await run(key,'自动回复 '+mode,{voice:false,requested:false,split:true});
+    await run(key,'自动回复 '+mode,{voice:false,requested:false,split:true,quoted:true});
     assert.equal(speechCalls.length,before+1);assert.equal(onebot.state.sends.length,sends+1);assert.match(speechCalls.at(-1).body.Text,/\n第二个短句/);
+    assert.deepEqual(onebot.state.sends.at(-1).body.message.map(segment=>segment.type),['record']);
    }
   }
   assert.equal(draws,4);

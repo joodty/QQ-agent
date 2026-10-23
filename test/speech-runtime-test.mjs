@@ -16,7 +16,7 @@ function fixture(chatKey='group:101'){
  const speech={runtimePolicy:()=>({allowed,settings:{maxChars:120}}),async synthesize(key,input){calls.tts.push({key,input});return {audio:Buffer.from('fixture-audio'),transcript:input.text,receipt};},assertCurrent(value){assert.equal(value,receipt);if(!allowed)throw Object.assign(Error('changed'),{code:'SPEECH_AUTHORIZATION_CHANGED'});}};
  const ctx={chatKey,triggerEntries:[{text:'请用语音回复我',self:false}],proactive:false,session:{id:'fixture-session',sent:[]},toolCallId:'fixture-call',speech,
   assertCurrent(){if(cancelled)throw Object.assign(Error('cancelled'),{code:'SPEECH_CANCELLED'});},
-  sender:{async sendMedia(key,segments,options){options.guard?.();calls.voice.push({key,segments,options});return {message_id:1};},async sendTextBatch(key,texts,options){options.guard?.();calls.text.push({key,texts});return {sent:texts.map(text=>({text}))};}}};
+  sender:{async sendMedia(key,segments,options){options.guard?.();calls.voice.push({key,segments,options});return {message_id:1};},async sendTextBatch(key,texts,options){options.guard?.();calls.text.push({key,texts,options});return {sent:texts.map(text=>({text}))};}}};
  return {ctx,calls,speech,setAllowed(value){allowed=value;},cancel(){cancelled=true;}};
 }
 test('speech demand comes from current human messages, never model args or proactive runs',()=>{
@@ -129,4 +129,28 @@ test('reply rescue treats known speech transcript as answered without converting
  const cap=name=>name==='reply.loose-send'?()=>({messages:['晚安。']}):name==='reply.grounded-select'?input=>{grounded=input;return {enabled:true,picked:input.proposed};}:null;
  assert.deepEqual(await rescueUnsentReply({text:'晚安。',sent:[{type:'voice',text:'晚安。'}],cap}),[]);assert.equal(grounded.sent[0].type,'text');
  assert.equal((await rescueUnsentReply({text:'晚安。',sent:[{type:'media',text:'晚安。'}],cap})).length,1);
+});
+
+test('quoted replies participate in probability and explicit voice; text fallback keeps the quote',async()=>{
+ for(const key of ['group:101','private:101'])for(const requested of [false,true]){
+  const f=fixture(key);f.ctx.triggerEntries=[{text:requested?'请用语音回复':'晚上好'}];
+  f.speech.runtimePolicy=()=>({allowed:true,settings:{maxChars:120,autoVoicePercent:50}});let draws=0;
+  await createSpeechReplySender(f.ctx,{random:()=>{draws++;return .1;}})(['晚安。'],{replyToMessageId:-123});
+  assert.equal(draws,requested?0:1);assert.equal(f.calls.tts.length,1);assert.equal(f.calls.voice.length,1);assert.equal(f.calls.text.length,0);
+  assert.deepEqual(f.calls.voice[0].segments.map(s=>s.type),['record']);assert.equal(f.ctx.session.speechDecision.status,'sent');assert.equal(f.ctx.session.speechDecision.quotedReply,true);
+  assert.doesNotMatch(JSON.stringify(f.ctx.session.speechDecision),/晚安|fixture-audio|base64|secret/i);
+ }
+ const f=fixture();f.ctx.triggerEntries=[{text:'晚上好'}];f.speech.runtimePolicy=()=>({allowed:true,settings:{maxChars:120,autoVoicePercent:50}});
+ await createSpeechReplySender(f.ctx,{random:()=>.9})(['保留引用的文字。'],{replyToMessageId:-123});
+ assert.equal(f.calls.tts.length,0);assert.equal(f.calls.text[0].options.replyToMessageId,-123);assert.equal(f.ctx.session.speechDecision.reason,'random_miss');
+});
+
+test('selected quoted speech respects caller guards before synthesis and preserves the quote on provider failure',async()=>{
+ const f=fixture();f.ctx.triggerEntries=[{text:'晚上好'}];f.speech.runtimePolicy=()=>({allowed:true,policyVersion:'fixture-policy',settings:{maxChars:120,autoVoicePercent:50}});
+ await assert.rejects(createSpeechReplySender(f.ctx,{random:()=>0})(['不能发送。'],{replyToMessageId:123,guard:()=>false}),{code:'SPEECH_AUTHORIZATION_CHANGED'});
+ assert.equal(f.calls.tts.length,0);assert.equal(f.calls.voice.length,0);assert.equal(f.calls.text.length,0);
+ const other=fixture();other.ctx.triggerEntries=[{text:'晚上好'}];other.speech.runtimePolicy=f.speech.runtimePolicy;
+ other.speech.synthesize=async()=>{throw Object.assign(Error('fixture'),{code:'SPEECH_COOLDOWN'});};
+ await createSpeechReplySender(other.ctx,{random:()=>0})(['冷却时发文字。'],{replyToMessageId:123});
+ assert.equal(other.calls.text[0].options.replyToMessageId,123);assert.equal(other.ctx.session.speechDecision.reason,'SPEECH_COOLDOWN');
 });
