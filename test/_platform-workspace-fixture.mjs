@@ -5,7 +5,7 @@ import http from 'node:http';
 import {catalogueAsset} from '../src/http-public-assets.js';
 
 /** Real local auth/business HTTP for DOM/browser tests. Every identity and Key is synthetic. */
-export async function createWorkspaceFixture({empty=false,admin=false,speechCredentials=undefined}={}){
+export async function createWorkspaceFixture({empty=false,admin=false,speechCredentials=undefined,onebot={selfId:'888'}}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-workspace-ui-'));process.env.QQ_AGENT_DATA_DIR=root;
  const {createPlatformAuth}=await import('../src/platform-auth.js'),{createPlatformBusiness}=await import('../src/platform-business.js'),{ConversationArchives}=await import('../src/conversation-archives.js'),{ChatStore}=await import('../src/store.js'),{getConfig,setRuntimeConfig,DEFAULT_CONFIG}=await import('../src/config.js'),{closeProductionPaidCallGuard}=await import('../src/paid-call-guard.js'),{createPlatformResourceRoutes}=await import('../src/routes.js');
  const cfg={...structuredClone(DEFAULT_CONFIG),ownerQQ:'999',api:{...DEFAULT_CONFIG.api,baseUrl:'https://api.deepseek.com',apiKey:'fixture-model-key',model:'deepseek-flash'},allow:{groups:['789'],private:['999']},deny:{groups:[],private:[]},productionBudget:{enabled:true,endpoint:'https://api.deepseek.com',model:'deepseek-flash',prices:{inputCnyPerMillion:2,cacheHitCnyPerMillion:.04,outputCnyPerMillion:8,reasoningIncluded:true},defaultDailyLimitCny:1,overrides:{},initialSpent:{},funding:{'group:789':{mode:'platform',enabled:true},'private:999':{mode:'platform',enabled:true}},outputCap:512,imageTokensPerImage:1024}};
@@ -38,7 +38,7 @@ export async function createWorkspaceFixture({empty=false,admin=false,speechCred
  business=createPlatformBusiness({file:path.join(root,'platform-business.sqlite'),keyFile:path.join(root,'platform-business.key'),archives,store,orchestrator:{archiveChanged(){}},auth,config:getConfig});
  const {createSpeechService}=await import('../src/speech-service.js'),{createSpeechRoutes}=await import('../src/speech-routes.js'),{createSpeechUsage}=await import('../src/speech-usage.js');
  const speech=createSpeechService({file:path.join(root,'speech.sqlite'),auth,store,config:getConfig,...(speechCredentials===undefined?{}:{credentials:speechCredentials})});
- routes=createPlatformResourceRoutes({platformAuth:auth,platformBusiness:business,speechService:speech,onebot:{selfId:'888'},orchestrator:{chatNameCache:new Map([['789','朋友们的读书和日常闲聊群']])},readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}});
+ routes=createPlatformResourceRoutes({platformAuth:auth,platformBusiness:business,speechService:speech,onebot,orchestrator:{chatNameCache:new Map([['789','朋友们的读书和日常闲聊群']])},readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}});
  routes.push(...createSpeechRoutes({auth,service:speech,usage:createSpeechUsage({file:path.join(root,'paid-calls.sqlite'),auth}),readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}}));
  const activeCookie=admin?auth.cookie((await auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0]:cookie;
  const principal=auth.authenticate(activeCookie);

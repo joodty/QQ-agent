@@ -81,8 +81,9 @@ test('voice browser shares one accessible draft workflow for ordinary and admini
   assert.equal(f.speech.settings(f.principal,'private:777').settings.overrides.voiceType,null);
  });
  await t.test('paid preview states selected-chat cost before its explicit click and never changes settings or sends QQ',async()=>{
-  preview.allowed=true;d.querySelector('[data-action="refresh"]').click();await waitFor(()=>!d.querySelector('[data-action="refresh"]').disabled);
-  open();reset();filter('category','supernatural');assert.match(dialog().textContent,/占用.*本人私聊/);assert.match(dialog().textContent,/20 字符/);assert.match(dialog().textContent,/至少间隔 60 秒/);
+  await waitFor(()=>!d.getElementById('main').hasAttribute('aria-busy')&&d.querySelector('form[data-action="save-speech-settings"]'));
+  preview.allowed=true;d.querySelector('[data-action="refresh"]').click();await waitFor(()=>!d.querySelector('[data-action="refresh"]').disabled&&!d.getElementById('main').hasAttribute('aria-busy')&&d.querySelector('form[data-action="save-speech-settings"]'));
+  open();reset();filter('category','supernatural');assert.match(dialog().textContent,/占用.*QQ 777（我的私聊）/);assert.match(dialog().textContent,/20 字符/);assert.match(dialog().textContent,/至少间隔 60 秒/);
   const button=d.querySelector('[data-voice-synthesize="402000"]');assert.match(button.textContent,/0\.013/);assert.equal(button.disabled,false);
   const before=JSON.stringify(f.speech.settings(f.principal,'private:777'));preview.deferred=true;button.click();assert.equal(preview.requests.length,1);assert.ok(d.querySelector('[data-voice-synthesize]').disabled);
   assert.equal(preview.requests[0].chatKey,'private:777');assert.equal(preview.requests[0].voiceType,402000);assert.equal(typeof preview.requests[0].expectedPolicyVersion,'string');
