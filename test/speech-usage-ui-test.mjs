@@ -58,6 +58,7 @@ test('speech usage renders real authorized HTTP statistics without changing sett
   await t.test('administrator platform aggregate includes historical scopes and daily totals without changing speech switches', async () => {
     submit(admin,{days:'30',range:'all'});await waitFor(()=>panel(admin).querySelector('.speech-usage-conversations'),5000,'platform aggregate');
     assert.match(panel(admin).textContent,/按群聊与私聊查看（3 个聊天）/);assert.match(panel(admin).textContent,/群聊 999/);
+    assert.match(panel(admin).querySelector('.speech-usage-conversations').textContent,/私聊 777/);
     assert.match(panel(admin).textContent,/0\.00021/);assert.equal(admin.document.querySelector('form[data-action="save-speech-platform"] [name="enabled"]').checked,false);
   });
   await t.test('report errors are visible instead of fabricated zero usage and retry does not write configuration', async () => {
