@@ -21,9 +21,10 @@ import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
 import { archiveHistorySection } from './archive-runtime.js';
 import { runWithPaidConversation } from './paid-call-guard.js';
+import { speechWasRequested, createSpeechReplySender } from './speech-runtime.js';
 
 export class Orchestrator {
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null, speech = null, speechRandom = Math.random }) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -32,6 +33,8 @@ export class Orchestrator {
     this.onebot = onebot;
     this.reminders = reminders;   // ReminderStore（可选；闹钟/计时功能）
     this.videoReader = videoReader; // VideoReader（可选；视频读取功能）
+    this.speech = speech;
+    this.speechRandom = speechRandom;
     // 事件出口：正常情况下由 app.js 注入（转发到 SSE）。
     // 兜底必须是**明确的 no-op** —— 早先用 createEventBus() 兜底，
     // 但那个总线上永远没人订阅，事件会被静默吞掉，排查时看不到任何线索。
@@ -814,8 +817,14 @@ export class Orchestrator {
       && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
     const searchEnabled = cfg.webSearch?.enabled !== false;
     const toolsCfg = cfg.tools || {};
+    let speechPolicy = { allowed: false, reason: '这次没有明确索要语音' };
+    if (this.speech && speechWasRequested(triggerEntries, { proactive })) {
+      try { speechPolicy = this.speech.runtimePolicy(chatKey); }
+      catch { speechPolicy = { allowed: false, reason: '腾讯云语音暂不可用，请使用文字回复' }; }
+    }
     const skillContext = {
       chatKey, kind, chatId, chatName,
+      speechPolicy,
       model: cfg.api.model,
       provider: cfg.api.provider,
       visionEnabled,
@@ -965,6 +974,11 @@ export class Orchestrator {
 
     const ctx = {
       chatKey, kind, chatId,
+      speech: this.speech, triggerEntries, proactive, abortSignal,
+      assertCurrent: () => {
+        if (abortSignal.aborted || this.aborted || this.sessionAbortMarks.has(session.id)) throw Object.assign(Error('本次回复已取消'), { code: 'SPEECH_CANCELLED' });
+        this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
+      },
       selfId: this.onebot.selfId,
       selfNickname,
       botName: cfg.persona.botName,
@@ -978,6 +992,7 @@ export class Orchestrator {
       videoReader: this.videoReader,
       emit: (type, payload) => this.emit(type, payload)
     };
+    ctx.replyText = createSpeechReplySender(ctx, { random: this.speechRandom });
 
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
     let finish = false;
@@ -1188,6 +1203,7 @@ export class Orchestrator {
       // 记下这批工具的起点：下面要用"本批新增了哪些发送记录"判断本地模型能不能收尾
       const sentBeforeBatch = session.sent.length;
       for (const call of toolCalls) {
+        ctx.toolCallId = call.id;
         this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
         const name = call?.function?.name ?? '';
         const argsRaw = call?.function?.arguments ?? '{}';

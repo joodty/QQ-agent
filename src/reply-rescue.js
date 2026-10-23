@@ -50,7 +50,7 @@ export async function rescueUnsentReply({
     try { if (planningFn({ text: body })?.planning) return []; } catch { /* 判不了就继续往下走 */ }
   }
 
-  const alreadySent = (sent || []).filter((s) => s?.type === 'text').map((s) => String(s.text || ''));
+  const alreadySent = (sent || []).filter((s) => ['text','voice'].includes(s?.type)).map((s) => String(s.text || ''));
 
   // ② 正则级抢救（便宜、不花模型调用）
   let messages = [];
@@ -85,10 +85,12 @@ export async function rescueUnsentReply({
   const groundedFn = cap('reply.grounded-select');
   if (groundedFn) {
     try {
-      const r = groundedFn({ proposed: messages, sent: sent.map((s) => ({ type: s?.type, text: s?.text })) });
+      const r = groundedFn({ proposed: messages, sent: sent.map((s) => ({ type: s?.type === 'voice' ? 'text' : s?.type, text: s?.text })) });
       if (r?.enabled) messages = asMessages(r.picked);
     } catch { return []; }   // 筛不了就不发（保守侧）
   }
+  if (!messages.length) return [];
+  messages = messages.filter(message => !alreadySent.includes(message));
   if (!messages.length) return [];
 
   // 合成 tool_call 交给核心统一执行：这样限频、去重、分条、存档、before-tool 守卫

@@ -4,7 +4,7 @@ import path from 'node:path';
 import http from 'node:http';
 
 /** Real local auth/business HTTP for DOM/browser tests. Every identity and Key is synthetic. */
-export async function createWorkspaceFixture({empty=false,admin=false}={}){
+export async function createWorkspaceFixture({empty=false,admin=false,speechCredentials=undefined}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-workspace-ui-'));process.env.QQ_AGENT_DATA_DIR=root;
  const {createPlatformAuth}=await import('../src/platform-auth.js'),{createPlatformBusiness}=await import('../src/platform-business.js'),{ConversationArchives}=await import('../src/conversation-archives.js'),{ChatStore}=await import('../src/store.js'),{getConfig,setRuntimeConfig,DEFAULT_CONFIG}=await import('../src/config.js'),{closeProductionPaidCallGuard}=await import('../src/paid-call-guard.js'),{createPlatformResourceRoutes}=await import('../src/routes.js');
  const cfg={...structuredClone(DEFAULT_CONFIG),ownerQQ:'999',api:{...DEFAULT_CONFIG.api,baseUrl:'https://api.deepseek.com',apiKey:'fixture-model-key',model:'deepseek-flash'},allow:{groups:['789'],private:['999']},deny:{groups:[],private:[]},productionBudget:{enabled:true,endpoint:'https://api.deepseek.com',model:'deepseek-flash',prices:{inputCnyPerMillion:2,cacheHitCnyPerMillion:.04,outputCnyPerMillion:8,reasoningIncluded:true},defaultDailyLimitCny:1,overrides:{},initialSpent:{},funding:{'group:789':{mode:'platform',enabled:true},'private:999':{mode:'platform',enabled:true}},outputCap:512,imageTokensPerImage:1024}};
@@ -34,11 +34,14 @@ export async function createWorkspaceFixture({empty=false,admin=false}={}){
  if(!empty){const proof=auth.issueBinding(user,{qq:'777'});auth.consumeBinding({private:true,qq:'777',text:proof.command});auth.store.grant(user.id,'group:789');}
  const archives=new ConversationArchives({file:path.join(root,'conversation-archives.sqlite')}),store=new ChatStore(0,{archives});
  business=createPlatformBusiness({file:path.join(root,'platform-business.sqlite'),keyFile:path.join(root,'platform-business.key'),archives,store,orchestrator:{archiveChanged(){}},auth,config:getConfig});
+ const {createSpeechService}=await import('../src/speech-service.js'),{createSpeechRoutes}=await import('../src/speech-routes.js');
+ const speech=createSpeechService({file:path.join(root,'speech.sqlite'),auth,store,config:getConfig,...(speechCredentials===undefined?{}:{credentials:speechCredentials})});
  routes=createPlatformResourceRoutes({platformAuth:auth,platformBusiness:business,onebot:{selfId:'888'},orchestrator:{chatNameCache:new Map([['789','朋友们的读书和日常闲聊群']])},readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}});
+ routes.push(...createSpeechRoutes({auth,service:speech,readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}}));
  const activeCookie=admin?auth.cookie((await auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0]:cookie;
  const principal=auth.authenticate(activeCookie);
- return {root,server,origin,auth,business,archives,store,principal,cookie:activeCookie,calls,
-  async close(){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));business.close();auth.close();archives.close();closeProductionPaidCallGuard();assertSafe();fs.rmSync(root,{recursive:true,force:true});}
+ return {root,server,origin,auth,business,speech,archives,store,principal,cookie:activeCookie,calls,
+  async close(){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));speech.close();business.close();auth.close();archives.close();closeProductionPaidCallGuard();assertSafe();fs.rmSync(root,{recursive:true,force:true});}
  };
  function assertSafe(){if(!root.startsWith(path.join(os.tmpdir(),'qq-agent-workspace-ui-')))throw Error('Unsafe fixture path');}
 }

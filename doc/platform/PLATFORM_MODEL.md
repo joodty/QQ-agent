@@ -76,8 +76,24 @@ schema 3 将消息和 transcript 数量保存为元数据并建立 chat 索引�
 
 `paid-calls.sqlite` 当前物理表为 `paid_documents(name, body)`：预算内核文档保存每日策略和尝试记录，包含 reserve/dispatched/settled/released/unknown、精确聊天、操作 ID、预留/实际微元、时间与未知原因。这里仍是 SQLite 内的受校验文档，不应把概念 ER 中的 `BUDGET_ATTEMPT` 误称为已经逐条规范化的物理表。
 
+本轮新增腾讯 TTS 服务预留：同一事务同时占用原聊天预算、`speech-subsidy-budget` 的该群/私聊补贴预算和 `speech-platform-budget` 的平台语音总预算；试用付款另占原试用总额。三类基础 hold 不是三次语音调用，不能把关联预留累加成三笔实际消费。请求发送后失败或交付未知保留 unknown，不因失败文字回退或跨日直接释放。`speech-cooldown` 文档持久保存各完整聊天键的最近调度时间。
+
+## 语音设置库 `speech.sqlite`
+
+| 表 | 主键及关键字段 | 职责 |
+| --- | --- | --- |
+| `speech_meta` | `name`；`value_json` | 平台语音开关、版本、音色/语速/音量、自动语音概率、单条字符上限、最短间隔、平台每日补贴上限 |
+| `speech_scopes` | `chat_key`；`version`、`enabled`、`max_chars`、`cooldown_ms`、`voice_type`、`speed`、`volume`、`auto_voice_percent` | 每个群/私聊共享一份语音设置；可空参数继承平台，普通管理者只操作自己的授权资源，不能提高平台限制 |
+| `speech_subsidies` | `chat_key`；`version`、`enabled`、`modes_json`、`daily_limit_micros` | 管理员明确允许哪些 LLM 付款模式使用该资源的平台 TTS 补贴，以及该资源补贴上限；默认不授权 |
+
+当前仍限主公共机器人，表内 `chat_key` 使用完整 `group:` / `private:`，同号不混用。平台和资源设置采用版本 CAS；开关、补贴和出资/档案权限在合成前后、排队后再核验。普通用户自带模型 Key 不等于自动获得平台 TTS Key。语音凭据不存本库，只由独立私有文件读取，公开状态只有是否配置；准备方式见 [腾讯语音凭据](TENCENT_SPEECH_CREDENTIAL.md)。本地语音费用按标价估算，未同步免费包实际抵扣。
+
+schema 2 增加资源音色/语速/音量三列，schema 3 再增加自动语音概率；已有 schema 1/2 先校验、再事务升级，已有资源取平台默认值，不改原费用账本或预算初值。平台初始音色 `101001`、语速/音量 `0`、自动概率 `0%`；可选音色只来自固定同价精品目录，不能传入任意 ID 引入其他价类。未知 schema 或无本库身份的文件拒绝接管。
+
+## 原生文件与验证边界
+
 人设档案和账号库之外，上游原生的单次 Agent 运行记录、部分记忆、用量报表及全局配置仍保留文件存储。这次迁移不等于将 QQ Agent 的所有存储都换成 SQLite，也不等于重放 DSH 的专属执行器。运行详情默认不返回庞大 provider raw；管理员点击 JSON 时才读取。
 
 一段会话历史能够恢复，不保证供应商的提示缓存仍命中。账本金额来自约定价格与可验证用量，是平台估算，供应商实际账单是另一条事实来源。跨午夜、未知用量、重试和平台体验总额需继续遵守统一预算内核约束。
 
-相关实现：`src/platform-store.js`、`platform-auth.js`、`platform-business.js`、`conversation-archives.js`、`conversation-budget.js`、`paid-call-guard.js`。公开帮助页仅演示以上结构，不提供数据库浏览功能。
+相关实现：`src/platform-store.js`、`platform-auth.js`、`platform-business.js`、`conversation-archives.js`、`conversation-budget.js`、`paid-call-guard.js`、`speech-service.js`。公开帮助页仅演示以上结构，不提供数据库浏览功能。

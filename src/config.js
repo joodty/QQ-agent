@@ -361,6 +361,10 @@ export const DEFAULT_CONFIG = {
   // 扩展热重载：把自定义的插件/skill 目录放进 plugins/ 或 skills/ 后**自动生效**，无需重启。
   // 默认开 —— 这正是"放进去就能用"的体验来源。
   // ⚠️ 安全含义：等价于"任意落地的 JS 会被执行"。共享机器 / 只跑固定版本时建议关掉。
+  // Only a private server-side credential file; readiness/enabling and resource
+  // subsidy policies are authoritative in speech.sqlite, never inferred from a
+  // user's model API key. Empty means no Tencent HTTP can be dispatched.
+  speech: { credentialFile: '', timeoutMs: 10000 },
   extensions: {
     hotReload: true
   },

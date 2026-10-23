@@ -7,6 +7,7 @@
 // 重构说明：所有工具通过 registerTool() 注册到 tool-registry.js，
 // 支持在设置页按卡片勾选启用/禁用。
 import { getConfig } from './config.js';
+import { speechToolDefinition } from './speech-runtime.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
@@ -155,6 +156,7 @@ function loadPluginTools() {
 
 /** 注册所有内置工具到 registry。 */
 function registerAllTools() {
+  registerTool(speechToolDefinition);
   // 消息发送类
   registerTool({
     id: 'send_message',
@@ -175,11 +177,12 @@ function registerAllTools() {
       try {
         const messages = normalizeMessageList(args.messages);
         if (!messages.length) return err('消息内容为空');
-        const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
+        const options = {
           replyToMessageId: args.replyToMessageId ?? null,
           atUserId: args.atUserId ?? null
-        });
-        ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
+        };
+        const result = ctx.replyText ? await ctx.replyText(messages, options) : await ctx.sender.sendTextBatch(ctx.chatKey, messages, options);
+        ctx.session.sent.push(...result.sent.map((s) => ({ type: s.kind || 'text', text: s.text, at: s.at })));
         ctx.emit('session-update', ctx.session.id);
         const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
         if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);

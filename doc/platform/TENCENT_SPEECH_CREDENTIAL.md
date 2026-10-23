@@ -1,0 +1,77 @@
+# 腾讯云语音凭据准备
+
+核验日期：2026-10-23。领取免费资源包与创建 API 凭据是两步；领取过资源包不需要重复领取。本机保存成功只说明文件可安全读取，不代表云端已开通、资源包仍有效、TTS 调用成功或 QQ 已能播放。实际部署与验收状态见 [工作记录](WORK_LOG.md)。
+
+## 创建专用凭据
+
+打开 [腾讯云访问管理用户列表](https://console.cloud.tencent.com/cam)，创建一个专用于机器人语音的子用户。使用编程访问/API 密钥，不需要给它管理其他云产品或登录控制台的权限。主账号的身份验证、开通和资源包领取仍由本人完成，不把主账号密钥交给机器人。
+
+在“策略 → 新建自定义策略 → 按策略语法 → 空白模板”创建下面的策略，并关联到该子用户；再从该子用户的 API 密钥管理创建 SecretId/SecretKey。控制台名称可能调整，步骤依据 [腾讯云 TTS 访问管理操作指引](https://cloud.tencent.com/document/product/1073/95485)。当前只需要正式 `TextToVoice` 操作，策略如下，不需要填写账号号码：
+
+```json
+{
+  "version": "2.0",
+  "statement": [
+    {
+      "effect": "allow",
+      "action": ["tts:TextToVoice"],
+      "resource": ["*"]
+    }
+  ]
+}
+```
+
+预设策略 `QcloudTTSFullAccess` 操作更简单，但包含其他 TTS 管理操作，如开通、计费模式设置等，权限比单独 `TextToVoice` 大。本项目优先使用上面的自定义策略，不授予 CAM、服务器或其他云产品权限。[官方 API 接入说明](https://cloud.tencent.com/document/product/1073/56640) 另说明了开通、认证与 SecretId/SecretKey 的关系。不要因方便操作直接使用 API Explorer 发起未计入本地预算的真实合成测试。
+
+## 在 Windows 隐藏录入
+
+在仓库根目录打开 Windows PowerShell，执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\local\Set-TencentSpeechCredential.ps1
+```
+
+依次填写 SecretId 和 SecretKey，两次输入都隐藏，不把值放进命令参数、聊天、截图或 Git。默认写入本仓库 `.local/credentials/tencent-speech.dpapi.json`，用 Windows 当前用户 DPAPI 加密，文件和专用目录 ACL 只允许当前用户；路径穿越、重解析链接、不安全权限和未知原文件会被拒绝。新文件先加密写入同目录临时文件，再原子移动；已有文件默认不覆盖，明确加 `-Replace` 才会验证原文件并替换。该命令不联网，不改变云权限或生产配置。
+
+若刚从腾讯控制台下载了一个单行 CSV，可只传本机文件路径：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\local\Set-TencentSpeechCredential.ps1 -CredentialCsvPath '下载文件的完整路径.csv'
+```
+
+CSV 需要 `SecretId`、`SecretKey` 列，可选 `SessionToken`，不接受多行或猜测列含义。工具不打印文件内容，也不自动删除用户原文件；CSV 本身仍是明文，应在确认安全保存后由本人清理，避免把它复制进仓库。常规子用户长期密钥不需要 SessionToken；只有明确使用临时 STS 凭据才添加 `-IncludeSessionToken` 隐藏录入，临时凭据仍会到期。
+
+DPAPI 密文绑定当前 Windows 用户，不能直接复制到 Linux 使用，也不适合作为跨电脑唯一备份。密钥丢失时在腾讯控制台轮换，不使用聊天或公开配置恢复它。
+
+## 私有部署合同
+
+部署者可在本机私有进程中 dot-source 脚本，调用 `Get-TencentSpeechCredentialSecure -Path <私有文件路径>`；返回的 `secretId`、`secretKey` 和可选 `sessionToken` 均为 SecureString，不提供明文导出 CLI。授权部署程序仅在内存中解密、通过既有加密传输通道送入服务器；及时释放 SecureString 和非托管缓冲区，不把内容放进命令行、日志或临时明文文件。
+
+Linux 最终凭据是独立私有 JSON，字段合同为：`format='qq-agent-tencent-speech-credential'`、`version=1`、`secretId`、`secretKey`，可选 `sessionToken`。不要求 AppId。文件必须是普通非符号链接文件，权限 `0600`，只有运行身份可读。配置只保存 `speech.credentialFile` 的绝对路径；网页/API 只返回是否已配置，不返回路径或任何密钥值。DPAPI 包装格式与这个运行格式不同，不能把 Windows 密文当作 SecretKey。
+
+语音只使用腾讯正式 `tts.tencentcloudapi.com` / `TextToVoice` / `2019-08-23`，不会把聊天模型 Key 发送给腾讯，也不借用其他应用 OAuth。资源包实际抵扣未同步到本地账本，本地展示按标价估算；免费包到期、耗尽后的行为应查本人腾讯控制台与计费设置，不能把本地估算当供应商账单或保证免费。
+
+## 管理页参数
+
+平台和每个已授权群/私聊分别管理语音设置。管理员先明确平台开关和资源补贴，普通用户才可在本人有权限的资源内开关语音、选择音色、调整语速/音量；使用自己的聊天模型 Key 不会自动获得平台语音补贴。平台和资源初始均关闭，不提供绕预算的网页试听或未受控“测试合成”入口。
+
+首版仅开放下列六个同属精品价类的中文音色，不允许浏览器或模型任填其他音色 ID。名称、类别和采样率依据 [官方音色列表](https://cloud.tencent.com/document/product/1073/92668)，当前本地估算统一为精品标价 0.3 元/万字符：
+
+| ID | 名称 | 声音描述 |
+| --- | --- | --- |
+| `101001` | 智瑜 | 女声，情感风格，初始默认 |
+| `101055` | 智付 | 女声，通用 |
+| `101026` | 智希 | 女声，通用 |
+| `101004` | 智云 | 男声，通用 |
+| `101030` | 智柯 | 男声，通用 |
+| `101013` | 智辉 | 男声，新闻风格 |
+
+语速初始 `0`，表示正常速度，不是零倍；本平台首版只允许 `-1` 到 `2`，例如 `-1` 约 0.8 倍、`1` 约 1.2 倍、`2` 约 1.5 倍。音量初始 `0`，首版允许 `-5` 到 `5`，负值降低、正值提高；两者最多两位小数。腾讯 [TextToVoice 正式参数](https://cloud.tencent.com/document/api/1073/37995) 的范围更大，本平台有意收窄，避免异常播放效果。群/私聊留空则继承平台值；同群所有管理者共享同一份设置，并用版本校验避免相互覆盖。修改参数期间的旧合成不会自动沿用新授权发送。
+
+自动语音概率可设 `0` 到 `100` 的整数百分比，平台初始为 `0%`，各群/私聊可继承或单独覆盖，例如 `10%`。程序对一条适合朗读的完整回复抽一次，不逐段抽，也不让模型猜概率；用户明确要求语音时不靠抽签。概率不会绕过凭据、资源开关、补贴、额度、限频或取消检查，设置 `100%` 也不保证所有内容都能变成语音。没有凭据时仍只发文字。
+
+## 验证范围
+
+`node --test test/tencent-speech-credential-helper-test.mjs` 使用虚构凭据和隔离临时目录，验证 Windows DPAPI 往返、当前用户 ACL、隐藏输入、CSV、路径/链接拒绝和替换保护，不调用云 API。Windows 以外明确跳过 DPAPI 实测，不能算通过。完整语音链路另运行 `npm run test:speech`；真实账号/资源包、短语音合成与 QQ 手机播放仍须分别验证，不由这些文件测试替代。
+
+本轮 Windows 合并语音测试为 61/61，零失败/跳过，包含真实隔离 HTTP、模拟 OneBot/腾讯/模型和页面按钮；没有使用腾讯真实凭据或发送 QQ 消息。当前保留默认关闭/自动 `0%`，用户稍后准备凭据即可继续验证，不需要此时交出云账号或重新领取资源包。

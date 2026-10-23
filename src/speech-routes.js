@@ -1,0 +1,30 @@
+// Management routes never synthesize or send test messages.
+import { speechErrorMessage } from './speech-runtime.js';
+function publicProjection(value) {
+  if (Array.isArray(value)) return value.map(publicProjection);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'reason' && typeof item === 'string' && item.startsWith('SPEECH_') ? speechErrorMessage(item) : publicProjection(item)]));
+}
+export function createSpeechRoutes({ service, auth, readBody }) {
+  const access = async (principal, chatKey, write = false) => {
+    if (!chatKey) throw Object.assign(Error('请先选择群聊或私聊'), { statusCode: 400 });
+    await auth.ensureAccess(principal, chatKey, { botId: 'primary', write });
+  };
+  const admin = principal => { if (principal.role !== 'admin') throw Object.assign(Error('只有管理员能设置平台语音资助'), { statusCode: 403 }); };
+  const route = (method, name, work) => ({ method, pattern: '/api/platform/speech/' + name, handler: async ctx => {
+    if (!service) return ctx.json(ctx.res, 503, { error: '语音设置尚未启用' });
+    try { return ctx.json(ctx.res, 200, publicProjection(await work(auth.verifyPrincipal(ctx.principal), ctx))); }
+    catch (error) {
+      if (typeof error.code === 'string' && error.code.startsWith('SPEECH_')) throw Object.assign(Error(speechErrorMessage(error.code)), { statusCode: error.statusCode || 400 });
+      throw error;
+    }
+  }});
+  return [
+    route('GET', 'overview', principal => service.overview(principal)),
+    route('GET', 'settings', async (principal, ctx) => { const key = ctx.url.searchParams.get('chatKey'); await access(principal, key); return service.settings(principal, key); }),
+    route('PUT', 'settings', async (principal, ctx) => { const input = await readBody(ctx.req); await access(principal, input.chatKey, true); return service.updateSettings(principal, input); }),
+    route('GET', 'platform', principal => { admin(principal); return service.platformOverview(principal); }),
+    route('PUT', 'platform', async (principal, ctx) => { admin(principal); return service.updatePlatform(principal, await readBody(ctx.req)); }),
+    route('PUT', 'subsidy', async (principal, ctx) => { admin(principal); const input = await readBody(ctx.req); await access(principal, input.chatKey, true); return service.updateSubsidy(principal, input); })
+  ];
+}

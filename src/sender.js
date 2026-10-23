@@ -82,10 +82,15 @@ export class SendQueue {
     return selection;
   }
 
-  #guard(chatKey, selection) {
+  #guard(chatKey, selection, additional = null) {
     this.#assertCanSend(chatKey);
     this.store.assertArchiveCurrent?.(chatKey, selection);
     assertPaidAuthority(chatKey,selection?.paidAuthority);
+    if (additional !== null && additional !== undefined) {
+      if (typeof additional !== 'function') throw new TypeError('send guard must be a synchronous function');
+      const result = additional();
+      if (result === false || result?.then) throw Object.assign(Error('发送条件已变化'), { code: 'SEND_GUARD_REJECTED' });
+    }
   }
 
   #assertCanSend(chatKey) {
@@ -180,6 +185,7 @@ export class SendQueue {
    */
   async sendTextBatch(chatKey, messages, options = {}) {
     const selection = this.#capture(chatKey);
+    if (options.guard !== undefined) this.#guard(chatKey, selection, options.guard);
     const [kind, id] = String(chatKey).split(':');
     if (kind !== 'group' && kind !== 'private') throw new Error(`非法会话 key：${chatKey}`);
     const list = Array.isArray(messages) ? messages : [messages];
@@ -204,10 +210,10 @@ export class SendQueue {
       const isLast = i === parts.length - 1;
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
-        this.#guard(chatKey, selection);
+        this.#guard(chatKey, selection, options.guard);
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
-        this.#guard(chatKey, selection);
+        this.#guard(chatKey, selection, options.guard);
         // 发送去重：窗口期内 identical 文本跳过（防模型重复调用/超时重试造成的重复发言）
         if (this.#isDuplicate(chatKey, text)) {
           console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
@@ -412,6 +418,7 @@ export class SendQueue {
    */
   sendMedia(chatKey, segments, options = {}) {
     const selection = this.#capture(chatKey);
+    if (options.guard !== undefined) this.#guard(chatKey, selection, options.guard);
     const [kind, id] = String(chatKey).split(':');
     if (kind !== 'group' && kind !== 'private') return Promise.reject(new Error(`非法会话 key：${chatKey}`));
     const segs = (Array.isArray(segments) ? segments : []).filter((s) => s && s.type);
@@ -423,13 +430,13 @@ export class SendQueue {
       || label);
     const chain = this.#chain(chatKey);
     return chain(async () => {
-      this.#guard(chatKey, selection);
+      this.#guard(chatKey, selection, options.guard);
       if (this.#isDuplicate(chatKey, `__media__${dedupeKey}`)) {
         throw new Error('这份媒体刚刚发过，已跳过（避免重复刷屏）');
       }
       this.#checkRate(chatKey);
       await sleep(randInt(800, 1800));   // 视频/多图体积大，停顿比文字长一点
-      this.#guard(chatKey, selection);
+      this.#guard(chatKey, selection, options.guard);
       const data = await this.onebot.sendSegments(kind, id, segs);
       this.#markSent(chatKey, `__media__${dedupeKey}`);   // 成功后才记账
       const ts = Date.now();

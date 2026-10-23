@@ -29,6 +29,8 @@ import { extractCandidateUrls, dispatchMediaLinks } from './media-links.js';
 import { createRoutes } from './routes.js';
 import { createPlatformAuth } from './platform-auth.js';
 import { createPlatformBusiness } from './platform-business.js';
+import { createSpeechService } from './speech-service.js';
+import { createSpeechRoutes } from './speech-routes.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -85,7 +87,7 @@ function compareSemver(a, b) {
    防止监听器链式递归（见 createApp 内的递归护栏注释）。 */
 const appLogFns = new WeakSet();
 
-export function createApp({ log = console.log } = {}) {
+export function createApp({ log = console.log, speechCredentials = undefined } = {}) {
   const cfg = getConfig();
   const platformOrigin = cfg.platform?.publicOrigin || process.env.QQ_AGENT_PUBLIC_ORIGIN || '';
   const platformEnabled = cfg.platform?.enabled === true || Boolean(platformOrigin);
@@ -680,6 +682,11 @@ export function createApp({ log = console.log } = {}) {
     file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
     archives, store, orchestrator, auth: platformAuth, config: getConfig
   }) : null;
+  const speechService = platformEnabled ? createSpeechService({
+    file: path.join(DATA_DIR, 'speech.sqlite'), auth: platformAuth, store, orchestrator, config: getConfig,
+    ...(speechCredentials === undefined ? {} : { credentials: speechCredentials })
+  }) : null;
+  orchestrator.speech = speechService;
   let groupPermissionRefresh = null;
   const groupPermissionTimer = platformAuth ? setInterval(() => {
     if (groupPermissionRefresh) return;
@@ -1282,6 +1289,9 @@ export function createApp({ log = console.log } = {}) {
 
   function sanitizeConfig(cfg) {
     const out = JSON.parse(JSON.stringify(cfg ?? {}));
+    // Speech credentials are read only from private server files. Do not expose
+    // even their filesystem location through the administrator config dump.
+    if (out.speech) delete out.speech.credentialFile;
     const seen = new WeakSet();
 
     const walk = (node) => {
@@ -1376,6 +1386,7 @@ export function createApp({ log = console.log } = {}) {
     buildUsageStats, buildUsageBreakdown,
     reloadSkills
   });
+  apiRoutes.push(...createSpeechRoutes({ service: speechService, auth: platformAuth, readBody }));
 
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -1743,6 +1754,7 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.stopReminderLoop();
     await orchestrator.whenArchiveIdle?.();
     await sender.whenIdle?.();
+    speechService?.close();
     platformBusiness?.close();
     platformAuth?.close();
     archives?.close();
@@ -1770,7 +1782,7 @@ export function createApp({ log = console.log } = {}) {
     releaseInstanceLock();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, speechService, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
 }
 
 /**

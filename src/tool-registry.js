@@ -146,6 +146,9 @@ export function getToolAvailability(toolId, context = {}) {
   const deny = (code, reason) => ({ id: def.id, enabled: false, code, reason, skillId: def.skillId ?? null });
 
   // 1) 全局开关
+  if (def.id === 'send_voice' && runtimeContext.speechPolicy?.allowed !== true) {
+    return deny('speech-unavailable', runtimeContext.speechPolicy?.reason || '这个聊天尚未准备好腾讯云语音');
+  }
   if (toolsCfg.enabled === false) {
     return deny('tools-disabled', '工具总开关已关闭');
   }

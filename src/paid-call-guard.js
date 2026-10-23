@@ -55,6 +55,10 @@ export function assertPaidAuthority(key,token) {
   if(!token)return;
   const source=sourceFor(getConfig(),key);if(source.id!==token.id||source.version!==token.version)throw error('出资权限已撤销或变更');
 }
+export function capturePaidFunding(key) {
+  const source=sourceFor(getConfig(),key),token=capturePaidAuthority(key);
+  return {...token,mode:source.mode,ownerId:source.ownerId||null};
+}
 function endpoint(value) {
   if (typeof value !== 'string') throw error('付费端点未明确配置');
   let u; try { u = new URL(value); } catch { throw error('付费端点无效'); }
@@ -175,6 +179,25 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
   let seedAt = null;
   const budget = createConversationBudget({ storage, file: 'conversation-budget', botId: 'primary', now: () => seedAt ?? now() });
   let trialBudget=null;
+  const serviceTokens = new WeakMap();
+  const speechBudget = createConversationBudget({ storage, file:'speech-subsidy-budget', botId:'speech_subsidy', now });
+  const speechTotal = createConversationBudget({ storage, file:'speech-platform-budget', botId:'speech_platform', now });
+  function serviceAuthorization(check) {
+    if(typeof check!=='function')throw error('缺少语音独立出资核验');
+    const value=check();
+    if(!plain(value)||typeof value.id!=='string'||!value.id||typeof value.version!=='string'||!value.version
+      ||!money(value.scopeDailyLimitCny)||!money(value.platformDailyLimitCny)||!integer(value.cooldownMs)||value.cooldownMs<1000)throw error('语音出资或额度无效');
+    return value;
+  }
+  function syncService(key, limits) {
+    const scopeCfg=speechBudget.config();
+    if(!scopeCfg.enabled||scopeCfg.overrides[key]?.dailyLimitCny!==limits.scopeDailyLimitCny)
+      speechBudget.update({configVersion:scopeCfg.configVersion,enabled:true,defaultDailyLimitCny:0,overrides:{[key]:{enabled:true,dailyLimitCny:limits.scopeDailyLimitCny}}});
+    const totalCfg=speechTotal.config();
+    if(!totalCfg.enabled||totalCfg.defaultDailyLimitCny!==limits.platformDailyLimitCny)
+      speechTotal.update({configVersion:totalCfg.configVersion,enabled:true,defaultDailyLimitCny:limits.platformDailyLimitCny});
+  }
+  function serviceState(token) { const state=serviceTokens.get(token);if(!state)throw error('语音预留句柄无效');return state; }
   function trial(p) {
     if(!p.trial||!money(p.trial.dailyLimitCny)||!plain(p.trial.initialSpent))throw error('平台体验总额保护未配置');
     if(!trialBudget)trialBudget=createConversationBudget({storage,file:'platform-trial-budget',botId:'platform_trial',now:()=>seedAt??now()});
@@ -270,6 +293,43 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
     unknown(token, reason = 'network_error') { return storage.transaction(()=>{const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});return value;}); },
     release(token) { return storage.transaction(()=>{const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);return value;}); },
     attributions() { const raw = storage.readText('call-attribution'); return raw === null ? {} : JSON.parse(raw); },
+    serviceStatus(key, limits) { return storage.transaction(()=>{syncService(key,serviceAuthorization(()=>limits));return {scope:speechBudget.status(key),platform:speechTotal.status('private:1')};}); },
+    prepareService({ service, operationId=crypto.randomUUID(), amountCny, assertAuthorized,purpose='requested' }={}) {
+      if(service!=='speech'||!['requested','automatic'].includes(purpose)||typeof operationId!=='string'||!operationId||operationId.length>120||!money(amountCny)||amountCny<=0)throw error('语音调用报价或身份无效');
+      return storage.transaction(()=>{
+        const context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(assertAuthorized);sync(p);syncService(context.conversationKey,limits);
+        const key=context.conversationKey,operation='service:speech:'+operationId;
+        if(budget.records({key}).some(row=>row.operationId===operation))throw error('该语音操作已存在，禁止重复合成');
+        const trialLedger=p.source.mode==='trial'?trial(p):null;
+        const checks=[budget.status(key),speechBudget.status(key),speechTotal.status('private:1'),...(trialLedger?[trialLedger.status('private:1')]:[])];
+        if(checks.some(s=>s.action!=='normal'||s.spentCny+s.reservedCny+amountCny>=s.dailyLimitCny*.8))throw error('预算达到80%或语音补贴不足，已停止语音');
+        const holds=[{ledger:budget,key},{ledger:speechBudget,key},{ledger:speechTotal,key:'private:1'},...(trialLedger?[{ledger:trialLedger,key:'private:1'}]:[])].map((item,index)=>{
+          const hold=item.ledger.reserve(item.key,{operationId:index===0?operation:operation+':'+index,estimatedMaxCost:amountCny,quote:{currency:'CNY',complete:true}});
+          if(!hold.allowed)throw error('语音剩余额度不足');return {ledger:item.ledger,key:item.key,id:hold.id};
+        });
+        const token=Object.freeze({id:holds[0].id,key,operationId,amountCny});
+        serviceTokens.set(token,{holds,assertAuthorized,authorization:hash(limits),requestId:context.requestId,sourceId:p.source.id,sourceVersion:p.source.version,state:'reserved'});
+        const raw=storage.readText('call-attribution'),rows=raw===null?{}:JSON.parse(raw);
+        rows[token.id]={key,kind:'speech',provider:'tencent',mode:'platform-speech',ownerId:null,credentialRef:null,llmFundingMode:p.source.mode,llmOwnerId:p.source.ownerId||null,speechPurpose:purpose,model:'tencent-tts-premium',estimated:true,basis:'list-price-free-package-unsynchronized'};
+        storage.writeText('call-attribution',JSON.stringify(rows),raw);return token;
+      });
+    },
+    dispatchService(token) {
+      return storage.transaction(()=>{
+        const state=serviceState(token),context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(state.assertAuthorized);sync(p);syncService(token.key,limits);
+        if(state.state!=='reserved'||context.conversationKey!==token.key||context.requestId!==state.requestId||p.source.id!==state.sourceId||p.source.version!==state.sourceVersion||hash(limits)!==state.authorization)throw error('语音权限或出资已变更');
+        if(state.holds.some(h=>h.ledger.status(h.key).action!=='normal'))throw error('语音预算达到节流阈值');
+        const raw=storage.readText('speech-cooldown'),rows=raw===null?{}:JSON.parse(raw);
+        if(!plain(rows)||Object.values(rows).some(row=>!plain(row)||!integer(row.at)))throw error('语音冷却记录损坏','PAID_LEDGER_UNAVAILABLE');
+        if(rows[token.key]&&now()-rows[token.key].at<limits.cooldownMs)throw error('语音冷却中');
+        for(const hold of state.holds)if(!hold.ledger.dispatch(hold.id).mayDispatch)throw error('语音额度已变更');
+        Object.defineProperty(rows,token.key,{value:{at:now()},enumerable:true,configurable:true,writable:true});storage.writeText('speech-cooldown',JSON.stringify(rows),raw);
+        state.state='dispatched';
+      });
+    },
+    settleService(token) { return storage.transaction(()=>{const state=serviceState(token);const values=state.holds.map(h=>h.ledger.settle(h.id,{amount:token.amountCny,currency:'CNY'}));state.state='settled';return values[0];}); },
+    unknownService(token,reason='network_error') { return storage.transaction(()=>{const state=serviceState(token);const values=state.holds.map(h=>h.ledger.markUnknown(h.id,{reason}));state.state='unknown';return values[0];}); },
+    releaseService(token) { return storage.transaction(()=>{const state=serviceState(token);if(state.state!=='reserved')throw error('已发送语音不能释放费用');const values=state.holds.map(h=>h.ledger.release(h.id));state.state='released';return values[0];}); },
   };
 }
 
