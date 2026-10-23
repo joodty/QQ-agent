@@ -1,4 +1,4 @@
-// Management routes never synthesize or send test messages.
+// Only the explicit, scoped preview POST synthesizes; no management route sends QQ.
 import { speechErrorMessage } from './speech-runtime.js';
 function publicProjection(value) {
   if (Array.isArray(value)) return value.map(publicProjection);
@@ -31,6 +31,15 @@ export function createSpeechRoutes({ service, usage, auth, readBody }) {
     }),
     route('GET', 'overview', principal => service.overview(principal)),
     route('GET', 'settings', async (principal, ctx) => { const key = ctx.url.searchParams.get('chatKey'); await access(principal, key); return service.settings(principal, key); }),
+    route('POST', 'preview', async (principal, ctx) => {
+      const controller=new AbortController(),cancel=()=>controller.abort(),disconnected=()=>{if(!ctx.res.writableEnded)cancel();};
+      ctx.req.once('aborted',cancel);ctx.res.once('close',disconnected);
+      try {
+        const input=await readBody(ctx.req);await access(principal,input?.chatKey,true);
+        if(ctx.req.aborted||ctx.res.destroyed)cancel();
+        return await service.preview(principal,input,{signal:controller.signal});
+      } finally {ctx.req.off('aborted',cancel);ctx.res.off('close',disconnected);}
+    }),
     route('PUT', 'settings', async (principal, ctx) => { const input = await readBody(ctx.req); await access(principal, input.chatKey, true); return service.updateSettings(principal, input); }),
     route('GET', 'platform', principal => { admin(principal); return service.platformOverview(principal); }),
     route('PUT', 'platform', async (principal, ctx) => { admin(principal); return service.updatePlatform(principal, await readBody(ctx.req)); }),

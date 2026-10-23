@@ -23,6 +23,21 @@ test('official premium quote counts Chinese, letters, punctuation, whitespace an
   for(const maxChars of [151,0,'120',NaN])assert.throws(()=>quoteSpeechText('你好',{maxChars}),{code:'SPEECH_TEXT_INVALID'});
 });
 
+test('server catalogue quotes all three classes in integer micro-CNY and rejects an unknown or browser-supplied voice ID',()=>{
+  for(const [category,rate,micros] of [['premium',.3,30],['large-model',1.2,120],['supernatural',6.5,650]]){
+    const voice=TENCENT_SPEECH_VOICES.find(v=>v.category===category);assert.ok(voice,'catalogue has '+category);
+    for(const text of ['中','你好，世界。','😀','中'.repeat(150)]){
+      const quoted=quoteSpeechText(text,{voiceType:voice.voiceType});
+      assert.equal(quoted.amountCny,text.length*micros/1e6);assert.equal(quoted.category,category);assert.equal(quoted.rateCnyPer10k,rate);assert.equal(quoted.voiceType,voice.voiceType);
+      assert.ok(Number.isInteger(Math.round(quoted.amountCny*1e6)));assert.equal(quoted.estimated,true);
+    }
+  }
+  for(const voiceType of [-1,987654321,'101001',null,NaN])assert.throws(()=>quoteSpeechText('你好',{voiceType}),{code:'SPEECH_VOICE_INVALID'});
+  // Prices and free-package assumptions are never accepted from caller fields.
+  const voice=TENCENT_SPEECH_VOICES.find(v=>v.category==='supernatural');
+  assert.equal(quoteSpeechText('中',{voiceType:voice.voiceType,rateCnyPer10k:0,free:true}).amountCny,.00065);
+});
+
 test('TC3 signature binds exact body, fixed host, UTC date and tts service; credentials cannot introduce headers',()=>{
   const signed=signTencentSpeech({text:'你好',credentials,sessionId:'fixture-session',timestamp:1792728000});
   const digest=x=>crypto.createHash('sha256').update(x).digest('hex'),mac=(k,x)=>crypto.createHmac('sha256',k).update(x).digest();
@@ -43,10 +58,11 @@ test('actual loopback HTTP sends one signed official request and accepts a bound
   assert.equal(f.requests[0].body.Text,'你好，世界。');assert.equal(f.requests[0].body.Codec,'wav');
 });
 
-test('only approved same-price voices and bounded numeric speed/volume are signed and sent',async t=>{
-  const f=await fixture(t);assert.equal(TENCENT_SPEECH_VOICES.length,6);assert.deepEqual([...new Set(TENCENT_SPEECH_VOICES.map(v=>v.gender))].sort(),['female','male']);
-  for(const voice of TENCENT_SPEECH_VOICES){await f.call({voiceType:voice.voiceType,speed:-.5,volume:2.25});const body=f.requests.at(-1).body;assert.equal(body.VoiceType,voice.voiceType);assert.equal(body.Speed,-.5);assert.equal(body.Volume,2.25);assert.equal(voice.category,'premium');assert.equal(voice.rateCnyPer10k,.3);}
-  for(const options of [{voiceType:402000},{voiceType:501000},{voiceType:'101001'},{voiceType:NaN},{speed:3},{speed:-1.01},{speed:NaN},{speed:'1'},{speed:.001},{volume:6},{volume:Infinity},{volume:'0'},{volume:null}]){const before=f.requests.length;assert.throws(()=>validateSpeechVoiceOptions(options),{code:'SPEECH_VOICE_INVALID'});await assert.rejects(f.call(options),{code:'SPEECH_VOICE_INVALID',dispatched:false});assert.equal(f.requests.length,before);}
+test('only catalogued TextToVoice voices and bounded numeric speed/volume are signed and sent',async t=>{
+  const f=await fixture(t);assert.ok(TENCENT_SPEECH_VOICES.length>6);assert.ok(TENCENT_SPEECH_VOICES.some(v=>v.gender==='female'));assert.ok(TENCENT_SPEECH_VOICES.some(v=>v.gender==='male'));
+  for(const voice of TENCENT_SPEECH_VOICES){const signed=signTencentSpeech({text:'你好',credentials,sessionId:'fixture-session',voiceType:voice.voiceType,speed:-.5,volume:2.25}),body=JSON.parse(signed.body);assert.equal(body.VoiceType,voice.voiceType);assert.equal(body.Speed,-.5);assert.equal(body.Volume,2.25);assert.equal(body.Codec,'wav');assert.equal(body.SampleRate,16000);assert.equal(body.PrimaryLanguage,/^en(?:-|$)/.test(voice.language)?2:1);}
+  for(const category of ['premium','large-model','supernatural']){const voice=TENCENT_SPEECH_VOICES.find(v=>v.category===category);await f.call({voiceType:voice.voiceType});assert.equal(f.requests.at(-1).body.VoiceType,voice.voiceType);}
+  for(const options of [{voiceType:987654321},{voiceType:-1},{voiceType:'101001'},{voiceType:NaN},{speed:3},{speed:-1.01},{speed:NaN},{speed:'1'},{speed:.001},{volume:6},{volume:Infinity},{volume:'0'},{volume:null}]){const before=f.requests.length;assert.throws(()=>validateSpeechVoiceOptions(options),{code:'SPEECH_VOICE_INVALID'});await assert.rejects(f.call(options),{code:'SPEECH_VOICE_INVALID',dispatched:false});assert.equal(f.requests.length,before);}
   const a=signTencentSpeech({text:'你好',credentials,sessionId:'fixture-session',timestamp:1792728000}),b=signTencentSpeech({text:'你好',credentials,sessionId:'fixture-session',timestamp:1792728000,voiceType:101004,speed:.5,volume:1});assert.notEqual(a.headers.Authorization,b.headers.Authorization);
 });
 

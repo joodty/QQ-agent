@@ -67,7 +67,7 @@
     "test:gateway": "node --test test/admin-gateway-test.mjs test/persona-gateway-ui-test.mjs",
     "test:extensions": "node --test test/extensions-weather-compat-test.mjs test/extensions-meal-compat-test.mjs test/extensions-face-decode-test.mjs test/reviewed-extension-install-test.mjs",
     "test:speech-usage": "node --test test/speech-usage-test.mjs test/speech-usage-app-test.mjs test/speech-usage-ui-test.mjs",
-    "test:speech": "node --test test/speech-provider-test.mjs test/speech-service-test.mjs test/speech-runtime-test.mjs test/speech-app-test.mjs test/speech-workspace-ui-test.mjs test/tencent-speech-credential-helper-test.mjs",
+    "test:speech": "node --test test/speech-provider-test.mjs test/speech-service-test.mjs test/speech-runtime-test.mjs test/speech-app-test.mjs test/speech-workspace-ui-test.mjs test/tencent-speech-credential-helper-test.mjs test/speech-voices-test.mjs test/speech-catalog-ui-test.mjs test/speech-preview-test.mjs",
     "test:interactions": "node --test test/scoped-stickers-test.mjs test/sticker-download-test.mjs test/sticker-app-integration-test.mjs",
     "admin:gateway": "node scripts/admin-gateway.mjs",
     "test:prompt": "node test/test-prompt.mjs && node test/prompt-anchor-test.mjs",

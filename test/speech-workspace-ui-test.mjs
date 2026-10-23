@@ -17,6 +17,7 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
   await waitFor(()=>w.document.querySelector('form[data-action="save-speech-settings"]'),5000,'voice page hydrated');return w;
  }
  const user=await mount(f.cookie);
+ const chooseVoice=(window,voiceType)=>{const form=window.document.querySelector('form[data-action="save-speech-settings"]');form.querySelector('[data-action="choose-speech-voice"]').click();const search=window.document.getElementById('voice-picker-search');search.value=String(voiceType);search.dispatchEvent(new window.Event('input',{bubbles:true}));window.document.querySelector(`[data-voice-select="${voiceType}"]`).click();window.document.querySelector('[data-voice-confirm]').click();};
  await t.test('ordinary missing-key state gives an honest next step and no credential inputs',()=>{
   assert.equal(user.document.getElementById('page-title').textContent,'语音回复');
   assert.ok(user.document.querySelector('form[data-action="save-speech-settings"] [name="enabled"]').disabled);
@@ -24,12 +25,13 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
   assert.equal(user.document.querySelector('form[data-action="save-speech-platform"]'),null);
   assert.equal(user.document.querySelector('form[data-action="save-speech-subsidy"]'),null);
   assert.equal(user.document.querySelector('[name="secretKey"],[name="secretId"]'),null);
-  assert.equal(user.document.querySelectorAll('#speech-chat-voiceType option').length,7);
-  assert.match(user.document.querySelector('#speech-chat-voiceType').textContent,/智瑜.*女声/);
+  assert.equal(user.document.querySelectorAll('#speech-chat-voiceType option').length,1);
+  assert.match(user.document.querySelector('[data-voice-summary]').textContent,/智瑜.*女声/);
+  assert.ok(user.document.querySelector('[data-action="choose-speech-voice"]'));
   assert.doesNotMatch(user.document.getElementById('main').textContent,/SPEECH_|fixture-speech-secret/);
  });
  await t.test('missing-Key users may save voice preferences while enable remains off',async()=>{
-  const form=user.document.querySelector('form[data-action="save-speech-settings"]');form.elements.voiceType.value='101030';form.elements.speed.value='0.5';form.elements.volume.value='3';form.elements.autoVoicePercent.value='10';
+  chooseVoice(user,101030);const form=user.document.querySelector('form[data-action="save-speech-settings"]');form.elements.speed.value='0.5';form.elements.volume.value='3';form.elements.autoVoicePercent.value='10';
   form.dispatchEvent(new user.Event('submit',{bubbles:true,cancelable:true}));
   await waitFor(()=>f.speech.settings(f.principal,'group:789').settings.version===1);
   const row=f.speech.settings(f.principal,'group:789');assert.equal(row.settings.enabled,false);assert.equal(row.settings.voiceType,101030);assert.equal(row.settings.autoVoicePercent,10);
@@ -48,7 +50,7 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
  });
  await t.test('ordinary user saves stricter per-chat settings and private chat stays separate',async()=>{
   user.document.querySelector('[data-action="refresh"]').click();await waitFor(()=>!user.document.querySelector('form[data-action="save-speech-settings"]').elements.enabled.disabled);
-  const form=user.document.querySelector('form[data-action="save-speech-settings"]');form.elements.enabled.checked=true;form.elements.maxChars.value='40';form.elements.cooldownSec.value='2';form.elements.voiceType.value='101030';form.elements.speed.value='0.5';form.elements.volume.value='3';form.elements.autoVoicePercent.value='10';submit(user,'save-speech-settings');
+  chooseVoice(user,101030);const form=user.document.querySelector('form[data-action="save-speech-settings"]');form.elements.enabled.checked=true;form.elements.maxChars.value='40';form.elements.cooldownSec.value='2';form.elements.speed.value='0.5';form.elements.volume.value='3';form.elements.autoVoicePercent.value='10';submit(user,'save-speech-settings');
   await waitFor(()=>f.speech.settings(f.principal,'group:789').settings.enabled,5000,'user voice setting persisted');
   assert.equal(f.speech.settings(f.principal,'group:789').settings.maxChars,40);assert.equal(f.speech.settings(f.principal,'group:789').settings.cooldownMs,2000);
   assert.equal(f.speech.settings(f.principal,'group:789').settings.voiceType,101030);assert.equal(f.speech.settings(f.principal,'group:789').settings.speed,.5);assert.equal(f.speech.settings(f.principal,'group:789').settings.volume,3);
@@ -73,8 +75,10 @@ test('speech workspace uses real account/settings HTTP, explicit platform quota 
   user.document.querySelector('[data-action="refresh"]').click();
   await waitFor(()=>user.document.getElementById('speech-chat-speed')?.value==='0.25');
   assert.equal(user.document.getElementById('speech-chat-volume').value,'2');
+  const savingForm=user.document.querySelector('form[data-action="save-speech-settings"]');
   submit(user,'save-speech-settings');
   await waitFor(()=>f.speech.settings(f.principal,'group:789').settings.version===before.version+2);
+  await waitFor(()=>!savingForm.isConnected&&user.document.getElementById('feedback')?.textContent.includes('语音设置已保存'),5000,'browser save and reload completed before teardown');
   assert.equal(f.speech.settings(f.principal,'group:789').settings.speed,.25);
   assert.equal(f.speech.settings(f.principal,'group:789').settings.volume,2);
  });

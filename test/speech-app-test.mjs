@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import {makeDataDir,writeConfig,freePort,listen,waitFor,createMockOneBotHttp,createMockOneBotWs,createMockLLM} from './_harness.mjs';
+import {TENCENT_SPEECH_VOICES,TENCENT_SPEECH_SAMPLE_ORIGINS} from '../src/speech-voices.js';
 test('Tencent speech uses one scoped Agent for group/private and platform/BYOK with explicit independent quota',async t=>{
  const root=makeDataDir('qq-speech-app-'),origin='https://speech.example.test',nativeFetch=globalThis.fetch;
  const onebot=createMockOneBotHttp(),ws=createMockOneBotWs(),llm=createMockLLM();
@@ -31,7 +32,7 @@ test('Tencent speech uses one scoped Agent for group/private and platform/BYOK w
  app=createApp({log(){},speechCredentials:()=>credentialsReady?credential:null});await app.platformAuth.bootstrap({username:'fixture_admin',password:'fixture-admin-pass-2026'});
  const port=await app.start();await waitFor(()=>app.onebot.connected,10000,'fake OneBot connected');
  gateway=createAdminGateway({publicOrigin:origin,platformFile:path.join(root,'platform.sqlite'),targetOrigin:`http://127.0.0.1:${port}`,consoleToken:token});await gateway.listen(await freePort());
- const request=(method,route,body,cookie='')=>new Promise((resolve,reject)=>{const req=http.request({hostname:'127.0.0.1',port:gateway.server.address().port,path:route,method,headers:{host:new URL(origin).host,origin,cookie,...(body?{'content-type':'application/json'}:{})}},res=>{let text='';res.on('data',part=>text+=part);res.on('end',()=>resolve({status:res.statusCode,data:JSON.parse(text),cookie:res.headers['set-cookie']?.[0]?.split(';')[0]}));});req.on('error',reject);req.end(body?JSON.stringify(body):undefined);});
+ const request=(method,route,body,cookie='')=>new Promise((resolve,reject)=>{const req=http.request({hostname:'127.0.0.1',port:gateway.server.address().port,path:route,method,headers:{host:new URL(origin).host,origin,cookie,...(body?{'content-type':'application/json'}:{})}},res=>{let text='';res.on('data',part=>text+=part);res.on('end',()=>{let data=text;try{data=JSON.parse(text);}catch{}resolve({status:res.statusCode,data,headers:res.headers,cookie:res.headers['set-cookie']?.[0]?.split(';')[0]});});});req.on('error',reject);req.end(body?JSON.stringify(body):undefined);});
  const admin=(await request('POST','/api/auth/login',{username:'fixture_admin',password:'fixture-admin-pass-2026'})).cookie;
  const user=(await request('POST','/api/auth/register',{username:'fixture_user',password:'fixture-user-pass-2026'})).cookie;
  const principal=app.platformAuth.authenticate(admin);
@@ -43,6 +44,14 @@ test('Tencent speech uses one scoped Agent for group/private and platform/BYOK w
   assert.equal((await request('GET','/api/platform/speech/settings?chatKey=group:456',null,user)).status,403);
   const config=(await request('GET','/api/config',null,admin)).data;
   assert.ok(!JSON.stringify(config).includes('fixture-private-speech-credential'));assert.equal(speechCalls.length,0);
+ });
+ await t.test('the public workspace permits local preview audio without broadly opening media or synthesizing',async()=>{
+  const page=await request('GET','/workspace.html');assert.equal(page.status,200);
+  const policy=page.headers['content-security-policy'],media=policy.split(';').map(part=>part.trim()).find(part=>part.startsWith('media-src '));
+  assert.equal(media,"media-src 'self' data: blob:"+(TENCENT_SPEECH_SAMPLE_ORIGINS.length?' '+TENCENT_SPEECH_SAMPLE_ORIGINS.join(' '):''));
+  assert.doesNotMatch(media,/(?:https?:\s|\*|unsafe-inline)/);assert.equal(speechCalls.length,0);assert.equal(onebot.state.sends.length,0);
+  const p=(await request('GET','/api/platform/speech/platform',null,admin)).data;
+  assert.equal(p.voices.length,TENCENT_SPEECH_VOICES.length);assert.deepEqual([...new Set(p.voices.map(v=>v.category))].sort(),['large-model','premium','supernatural']);
  });
  credentialsReady=true;
  app.speechService.updatePlatform(principal,{expectedVersion:1,enabled:true,maxChars:120,cooldownMs:1000,dailyLimitCny:5});
@@ -82,6 +91,20 @@ test('Tencent speech uses one scoped Agent for group/private and platform/BYOK w
    }
   }
   assert.equal(draws,4);
+ });
+ await t.test('large-model and supernatural voices use the same real Agent path with exact category prices',async()=>{
+  for(const key of ['group:456','private:456'])for(const category of ['large-model','supernatural']){
+   const voice=TENCENT_SPEECH_VOICES.find(v=>v.category===category),old=app.speechService.settings(principal,key).settings;
+   app.speechService.updateSettings(principal,{chatKey:key,expectedVersion:old.version,enabled:true,voiceType:voice.voiceType});
+   await new Promise(resolve=>setTimeout(resolve,1050));
+   const guard=productionPaidCallGuard(),ids=new Set(guard.records({key}).map(row=>row.id)),before=speechCalls.length,sends=onebot.state.sends.length,text='你好小伙伴';
+   await run(key,text);
+   assert.equal(speechCalls.length,before+1);assert.equal(onebot.state.sends.length,sends+1);assert.equal(speechCalls.at(-1).body.VoiceType,voice.voiceType);
+   const attrs=guard.attributions(),records=guard.records({key}).filter(row=>!ids.has(row.id)&&attrs[row.id]?.kind==='speech');
+   assert.equal(records.length,1);assert.equal(records[0].state,'settled');assert.equal(records[0].amountCny,text.length*Math.round(voice.rateCnyPer10k*100)/1e6);assert.equal(records[0].actualCny,records[0].amountCny);
+   assert.equal(attrs[records[0].id].voiceType,voice.voiceType);assert.equal(attrs[records[0].id].model,'tencent-tts');
+   assert.equal(app.speechService.settings(principal,key).rateCnyPer10k,voice.rateCnyPer10k);
+  }
  });
  await t.test('known pre-QQ provider failure falls back to the same sentence while preserving unknown charge',async()=>{
   failProvider=true;const before=onebot.state.sends.length;

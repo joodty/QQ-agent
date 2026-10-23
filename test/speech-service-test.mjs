@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-speech-test-'));process.env.QQ_AGENT_DATA_DIR=root;
 const {createSpeechService,readSpeechCredential}=await import('../src/speech-service.js');
-const {createTencentSpeechProvider}=await import('../src/speech-provider.js');
+const {createTencentSpeechProvider,TENCENT_SPEECH_VOICES}=await import('../src/speech-provider.js');
 const {createPaidCallGuard,createPaidCallStorage,setPaidCallFundingServices,runWithPaidConversation,closeProductionPaidCallGuard}=await import('../src/paid-call-guard.js');
 const {getConfig,setRuntimeConfig,DEFAULT_CONFIG}=await import('../src/config.js');
 test.after(()=>{setPaidCallFundingServices(null);closeProductionPaidCallGuard();fs.rmSync(root,{recursive:true,force:true});});
@@ -68,14 +68,14 @@ test('voice preferences save while unconfigured, inherit platform defaults, over
   const s=f.service.runtimePolicy('group:101').settings;f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:s.version,enabled:true,voiceType:null,speed:null,volume:null});
   assert.equal(f.service.runtimePolicy('group:101').settings.voiceType,101055);assert.deepEqual(f.service.runtimePolicy('group:101').settings.overrides,{voiceType:null,speed:null,volume:null,autoVoicePercent:null});assert.throws(()=>f.service.assertCurrent(result.receipt),{code:'SPEECH_AUTHORIZATION_CHANGED'});
   f.advance(1001);const inherited=await f.call();assert.equal(inherited.estimatedCostCny,result.estimatedCostCny);assert.equal(f.requests.at(-1).body.VoiceType,101055);assert.equal(f.requests.at(-1).body.Speed,.5);assert.equal(f.requests.at(-1).body.Volume,-1);
-  const old=f.service.runtimePolicy('group:101').policyVersion;f.reopen();assert.equal(f.service.runtimePolicy('group:101').policyVersion,old);assert.equal(f.service.runtimePolicy('group:101').voices.length,6);
+  const old=f.service.runtimePolicy('group:101').policyVersion;f.reopen();assert.equal(f.service.runtimePolicy('group:101').policyVersion,old);assert.equal(f.service.runtimePolicy('group:101').voices.length,TENCENT_SPEECH_VOICES.length);
 });
 
-test('invalid expensive voices, strings and nonfinite/out-of-range style values cannot change persisted settings or incur a request',async t=>{
+test('uncatalogued voices, strings and nonfinite/out-of-range style values cannot change persisted settings or incur a request',async t=>{
   const f=await fixture(t);f.enable();const current=f.service.runtimePolicy('group:101');
-  for(const patch of [{voiceType:402000},{voiceType:501001},{voiceType:'101001'},{speed:NaN},{speed:3},{speed:.001},{speed:'1'},{volume:6},{volume:Infinity},{volume:'2'}])assert.throws(()=>f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:current.settings.version,enabled:true,...patch}),{code:'SPEECH_VOICE_INVALID'});
+  for(const patch of [{voiceType:987654321},{voiceType:-1},{voiceType:'101001'},{speed:NaN},{speed:3},{speed:.001},{speed:'1'},{volume:6},{volume:Infinity},{volume:'2'}])assert.throws(()=>f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:current.settings.version,enabled:true,...patch}),{code:'SPEECH_VOICE_INVALID'});
   assert.equal(f.service.runtimePolicy('group:101').policyVersion,current.policyVersion);assert.equal(f.requests.length,0);assert.equal(f.guard.records().length,0);
-  const platform=f.service.platformOverview(f.admin);for(const patch of [{voiceType:402000},{speed:NaN},{volume:null}])assert.throws(()=>f.service.updatePlatform(f.admin,{expectedVersion:platform.version,...patch}),{code:'SPEECH_SETTINGS_INVALID'});
+  const platform=f.service.platformOverview(f.admin);for(const patch of [{voiceType:987654321},{speed:NaN},{volume:null}])assert.throws(()=>f.service.updatePlatform(f.admin,{expectedVersion:platform.version,...patch}),{code:'SPEECH_SETTINGS_INVALID'});
 });
 
 test('automatic voice has a distinct trusted purpose, defaults to zero, inherits by scope and remains budget guarded',async t=>{
@@ -117,9 +117,102 @@ test('group/private and platform/BYOK use the same signed provider and shared le
   assert.equal(Object.values(f.guard.attributions()).filter(a=>a.llmOwnerId==='user-a').length,2);
 });
 
+test('all voice classes use server-selected list prices for group/private and platform/BYOK through the same three ledgers',async t=>{
+  const f=await fixture(t);f.enable('group:101');f.enable('private:101');
+  const categories=[['premium',.3,.00018],['large-model',1.2,.00072],['supernatural',6.5,.0039]];
+  for(const chatKey of ['group:101','private:101']){
+    for(const mode of ['platform','byok']){
+      if(mode==='byok')f.modes.set(chatKey,'byok');
+      for(const [category,rate,amount] of categories){
+        const voice=TENCENT_SPEECH_VOICES.find(v=>v.category===category);assert.ok(voice);
+        const current=f.service.runtimePolicy(chatKey),policy=f.service.updateSettings(f.user,{chatKey,expectedVersion:current.settings.version,enabled:true,voiceType:voice.voiceType});
+        assert.equal(policy.category,category);assert.equal(policy.rateCnyPer10k,rate);assert.equal(policy.voiceName,voice.name);
+        const result=await f.call(chatKey);assert.equal(result.estimatedCostCny,amount);assert.equal(f.requests.at(-1).body.VoiceType,voice.voiceType);
+        const rows=f.guard.records({key:chatKey}),last=rows.at(-1);assert.equal(last.amountCny,amount);assert.equal(last.state,'settled');
+        for(const name of ['speech-subsidy-budget','speech-platform-budget']){const auxiliary=f.document(name).records.at(-1);assert.equal(auxiliary.amountMicros,Math.round(amount*1e6));assert.equal(auxiliary.state,'settled');}
+        const attribution=Object.values(f.guard.attributions()).at(-1);assert.equal(attribution.voiceType,voice.voiceType);assert.equal(attribution.characters,6);assert.equal(attribution.model,'tencent-tts');
+        f.advance(1001);
+      }
+    }
+    assert.equal(f.guard.status(chatKey).spentCny,.0096);
+  }
+  assert.equal(f.requests.length,12);assert.equal(f.guard.serviceStatus('group:101',f.limits('group:101')).platform.spentCny,.0192);
+  const before=f.guard.records();f.reopen();assert.deepEqual(f.guard.records(),before);
+});
+
+test('expensive class reserves its actual price atomically and cannot use a cheaper voice estimate to pass subsidy or platform caps',async t=>{
+  const f=await fixture(t);f.enable('group:101',['platform'],.005);f.enable('private:101',['platform'],.005);
+  const large=TENCENT_SPEECH_VOICES.find(v=>v.category==='large-model'),supernatural=TENCENT_SPEECH_VOICES.find(v=>v.category==='supernatural');
+  const p=f.service.platformOverview(f.admin);f.service.updatePlatform(f.admin,{expectedVersion:p.version,voiceType:supernatural.voiceType,dailyLimitCny:.005});
+  const publicPlatform=f.service.platformOverview(f.user);assert.equal(publicPlatform.category,'supernatural');assert.equal(publicPlatform.rateCnyPer10k,6.5);
+  await assert.rejects(f.call('group:101',{text:'中'.repeat(10)}),{code:'SPEECH_ADMISSION_DENIED',dispatched:false});
+  assert.equal(f.requests.length,0);assert.equal(f.guard.records().length,0);
+  let current=f.service.runtimePolicy('group:101');f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:current.settings.version,enabled:true,voiceType:large.voiceType});
+  const started=deferred(),gate=deferred();f.plans.push({started,wait:gate.promise});const work=f.call('group:101',{text:'中'.repeat(10)});await started.promise;
+  assert.equal(f.guard.status('group:101').reservedCny,.0012);const live=f.guard.serviceStatus('group:101',f.limits('group:101'));assert.equal(live.scope.reservedCny,.0012);assert.equal(live.platform.reservedCny,.0012);
+  await assert.rejects(f.call('private:101',{text:'中'.repeat(6)}),{code:'SPEECH_ADMISSION_DENIED',dispatched:false});assert.equal(f.guard.records({key:'private:101'}).length,0);
+  gate.resolve();await work;assert.equal(f.requests.length,1);assert.equal(f.guard.serviceStatus('group:101',f.limits('group:101')).platform.spentCny,.0012);
+  // A later global change affects inherited private settings but not this override.
+  const next=f.service.platformOverview(f.admin);f.service.updatePlatform(f.admin,{expectedVersion:next.version,voiceType:101001});
+  assert.equal(f.service.runtimePolicy('private:101').rateCnyPer10k,.3);assert.equal(f.service.runtimePolicy('group:101').rateCnyPer10k,1.2);
+  assert.throws(()=>f.service.updatePlatform(f.admin,{expectedVersion:next.version,voiceType:supernatural.voiceType}),{code:'SPEECH_VERSION_CONFLICT'});
+});
+
+test('voice change during an expensive synthesis invalidates delivery while settled history retains its original quote and voice attribution',async t=>{
+  const f=await fixture(t);f.enable();const voice=TENCENT_SPEECH_VOICES.find(v=>v.category==='supernatural');
+  let old=f.service.runtimePolicy('group:101');f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:old.settings.version,enabled:true,voiceType:voice.voiceType});
+  const started=deferred(),gate=deferred();f.plans.push({started,wait:gate.promise});const pending=f.call();await started.promise;
+  old=f.service.runtimePolicy('group:101');f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:old.settings.version,enabled:true,voiceType:101001});
+  gate.resolve();await assert.rejects(pending,{code:'SPEECH_AUTHORIZATION_CHANGED',chargeOutcome:'settled'});
+  const before=f.guard.records(),attribution=structuredClone(f.guard.attributions());assert.equal(before.at(-1).amountCny,.0039);assert.equal(before.at(-1).state,'settled');assert.equal(Object.values(attribution).at(-1).voiceType,voice.voiceType);
+  f.reopen();assert.deepEqual(f.guard.records(),before);assert.deepEqual(f.guard.attributions(),attribution);assert.equal(f.service.runtimePolicy('group:101').rateCnyPer10k,.3);
+});
+
+test('failed expensive synthesis retains its original nonzero unknown reservation across all ledgers and the next day',async t=>{
+  const f=await fixture(t);f.enable();const voice=TENCENT_SPEECH_VOICES.find(v=>v.category==='supernatural'),old=f.service.runtimePolicy('group:101');
+  f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:old.settings.version,enabled:true,voiceType:voice.voiceType});
+  f.plans.push({status:403,raw:'{}'});await assert.rejects(f.call(),{code:'SPEECH_PROVIDER_REJECTED',chargeOutcome:'unknown'});
+  for(const name of ['conversation-budget','speech-subsidy-budget','speech-platform-budget']){const last=f.document(name).records.at(-1);assert.equal(last.state,'unknown');assert.equal(last.amountMicros,3900);}
+  f.nextDay();f.reopen();assert.equal(f.guard.status('group:101').reservedCny,.0039);const status=f.guard.serviceStatus('group:101',f.limits('group:101'));assert.equal(status.scope.reservedCny,.0039);assert.equal(status.platform.reservedCny,.0039);assert.equal(f.requests.length,1);
+});
+
+test('a legacy premium attribution stays unchanged when a new model-class attribution is appended',async t=>{
+  const f=await fixture(t);f.enable();await f.call();
+  const original=f.guard.records();let legacyId;
+  f.storage.transaction(()=>{const raw=f.storage.readText('call-attribution'),rows=JSON.parse(raw);legacyId=Object.keys(rows).at(-1);rows[legacyId].model='tencent-tts-premium';delete rows[legacyId].characters;delete rows[legacyId].voiceType;f.storage.writeText('call-attribution',JSON.stringify(rows),raw);});
+  const legacy=structuredClone(f.guard.attributions()[legacyId]);f.advance(1001);f.reopen();
+  const voice=TENCENT_SPEECH_VOICES.find(v=>v.category==='large-model'),old=f.service.runtimePolicy('group:101');f.service.updateSettings(f.user,{chatKey:'group:101',expectedVersion:old.settings.version,enabled:true,voiceType:voice.voiceType});await f.call();
+  assert.deepEqual(f.guard.records().slice(0,original.length),original);assert.deepEqual(f.guard.attributions()[legacyId],legacy);assert.equal(Object.values(f.guard.attributions()).at(-1).model,'tencent-tts');
+});
+
+test('preview purpose cannot be forged by chat callers and pre-cancel or unaffordable preview never dispatches or retains holds',async t=>{
+  const f=await fixture(t);f.enable();const voice=TENCENT_SPEECH_VOICES.find(v=>v.category==='supernatural');
+  const fields=()=>({chatKey:'group:101',voiceType:voice.voiceType,expectedPolicyVersion:f.service.runtimePolicy('group:101').policyVersion});
+  await assert.rejects(f.call('group:101',{purpose:'preview',direct:true,voiceType:voice.voiceType}),{code:'SPEECH_EXPLICIT_REQUEST_REQUIRED'});
+  const controller=new AbortController();controller.abort();await assert.rejects(f.service.preview(f.user,fields(),{signal:controller.signal}),{code:'SPEECH_CANCELLED'});
+  const old=f.service.runtimePolicy('group:101').subsidy;f.service.updateSubsidy(f.admin,{chatKey:'group:101',expectedVersion:old.version,enabled:true,allowedFundingModes:['platform'],dailyLimitCny:.0001});
+  await assert.rejects(f.service.preview(f.user,fields()),{code:'SPEECH_ADMISSION_DENIED'});assert.equal(f.requests.length,0);assert.equal(f.guard.records().length,0);
+});
+
+test('revocation after preview admission but before provider dispatch releases its original reservation in every speech ledger',async t=>{
+  const f=await fixture(t);f.enable();const original=f.guard.prepareService.bind(f.guard);f.guard.prepareService=fields=>{const token=original(fields);f.revoked.add('group:101');return token;};
+  const policy=f.service.runtimePolicy('group:101');await assert.rejects(f.service.preview(f.user,{chatKey:'group:101',voiceType:policy.voiceType,expectedPolicyVersion:policy.policyVersion}),{code:'SPEECH_AUTHORIZATION_CHANGED',dispatched:false});
+  assert.equal(f.requests.length,0);for(const name of ['conversation-budget','speech-subsidy-budget','speech-platform-budget'])assert.equal(f.document(name).records.at(-1).state,'released');
+});
+
+test('management previews share the two synthesis allocation slots with chat replies and cannot queue a third paid request',async t=>{
+  const f=await fixture(t);for(const chatKey of ['group:101','private:101','group:202'])f.enable(chatKey);
+  const preview=chatKey=>{const p=f.service.runtimePolicy(chatKey);return f.service.preview(chatKey==='group:202'?f.admin:f.user,{chatKey,voiceType:p.voiceType,expectedPolicyVersion:p.policyVersion});};
+  const startedOne=deferred(),startedTwo=deferred(),one=deferred(),two=deferred();f.plans.push({started:startedOne,wait:one.promise},{started:startedTwo,wait:two.promise});
+  const first=f.call('group:101');await startedOne.promise;const second=preview('private:101');await startedTwo.promise;
+  await assert.rejects(preview('group:202'),{code:'SPEECH_BUSY',dispatched:false});assert.equal(f.requests.length,2);assert.equal(f.guard.records({key:'group:202'}).length,0);
+  one.resolve();await first;await preview('group:202');two.resolve();await second;assert.equal(f.requests.length,3);assert.equal(Object.values(f.guard.attributions()).filter(row=>row.speechPurpose==='preview').length,2);
+});
+
 test('LLM 80 percent/100 percent/zero limit stop optional voice without a provider request',async t=>{
   const f=await fixture(t,{initialSpent:{'2026-10-23':{'group:101':.8,'private:101':1}}});f.enable('group:101');f.enable('private:101');
   await assert.rejects(f.call(),{code:'SPEECH_ADMISSION_DENIED',chargeOutcome:'not_sent'});await assert.rejects(f.call('private:101'),{code:'SPEECH_ADMISSION_DENIED'});
+  for(const chatKey of ['group:101','private:101']){const policy=f.service.runtimePolicy(chatKey);await assert.rejects(f.service.preview(f.user,{chatKey,voiceType:policy.voiceType,expectedPolicyVersion:policy.policyVersion}),{code:'SPEECH_ADMISSION_DENIED',chargeOutcome:'not_sent'});}
   const cfg=getConfig();cfg.productionBudget.overrides['group:101']=0;setRuntimeConfig(cfg);await assert.rejects(f.call(),{code:'SPEECH_ADMISSION_DENIED'});
   assert.equal(f.requests.length,0);assert.equal(f.guard.records().length,2);
 });
@@ -197,6 +290,14 @@ test('receipt and persisted settings reject forged/corrupt state; credential fil
   const file=path.join(f.folder,'credential.json');fs.writeFileSync(file,JSON.stringify(secret),{mode:0o600});assert.deepEqual(readSpeechCredential(file),secret);assert.equal(readSpeechCredential(path.join(f.folder,'absent.json')),null);
   fs.writeFileSync(file,'{malformed');assert.throws(()=>readSpeechCredential(file),{code:'SPEECH_CREDENTIAL_INVALID'});
   const db=new DatabaseSync(f.speechFile);db.prepare("UPDATE speech_meta SET value_json='null' WHERE name='platform'").run();db.close();assert.throws(()=>f.service.runtimePolicy('group:101'),{code:'SPEECH_STORAGE_INVALID'});
+});
+
+test('English-only preview uses a fixed English phrase with the same displayed character count and exact quote',async t=>{
+  const f=await fixture(t);f.enable();const selected=TENCENT_SPEECH_VOICES.find(v=>/^en(?:-|$)/.test(v.language));assert.ok(selected);
+  const policy=f.service.settings(f.user,'group:101'),result=await f.service.preview(f.user,{chatKey:'group:101',voiceType:selected.voiceType,expectedPolicyVersion:policy.policyVersion});
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].body.Text,'Hi, dear friend');assert.equal(f.requests[0].body.PrimaryLanguage,2);assert.equal(f.requests[0].body.VoiceType,selected.voiceType);
+  assert.equal(result.characters,policy.previewCharacters);assert.equal(result.characters,15);assert.equal(result.estimatedCostCny,15*selected.rateCnyPer10k/10000);
+  assert.equal(f.service.settings(f.user,'group:101').settings.voiceType,101001);
 });
 
 test('existing seed marker and 26 settled records are preserved byte-for-byte when enabling and using speech',async t=>{

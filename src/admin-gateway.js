@@ -5,7 +5,7 @@ import { createPlatformAuth } from './platform-auth.js';
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
-const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'etag', 'last-modified', 'content-encoding']);
+const RESPONSE_HEADERS = new Set(['content-type', 'content-length', 'etag', 'last-modified', 'content-encoding', 'content-security-policy']);
 const PUBLIC_STATIC = new Set(['/login.html', '/workspace.html', '/platform.js', '/platform.css', '/help.html', '/favicon.ico']);
 const CONFIG_FIELDS = new Set(['api', 'providers', 'dshProviderKeys', 'persona', 'personaByChat', 'personaUnified',
   'allow', 'deny', 'allowAllWhenEmpty', 'store', 'send', 'memory', 'groupSliderPos', 'unifiedTier', 'chatActive',
@@ -170,6 +170,9 @@ export function createAdminGateway({ publicOrigin, platformAuth, platformFile,
       response.pipe(res);
     });
     active.add(upstream);
+    // A preview can still be synthesizing before the first response headers.
+    // Propagate a real browser disconnect during that wait as well as streaming.
+    res.once('close', () => { if (!res.writableEnded) upstream.destroy(); });
     upstream.setTimeout(upstreamTimeoutMs, () => upstream.destroy(new Error('Upstream timed out')));
     upstream.on('error', () => reply(res, 502, '新控制台暂不可用'));
     upstream.on('close', () => active.delete(upstream));

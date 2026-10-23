@@ -295,7 +295,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
     attributions() { const raw = storage.readText('call-attribution'); return raw === null ? {} : JSON.parse(raw); },
     serviceStatus(key, limits) { return storage.transaction(()=>{syncService(key,serviceAuthorization(()=>limits));return {scope:speechBudget.status(key),platform:speechTotal.status('private:1')};}); },
     prepareService({ service, operationId=crypto.randomUUID(), amountCny, assertAuthorized,purpose='requested',characters,voiceType }={}) {
-      if(service!=='speech'||!['requested','automatic'].includes(purpose)||typeof operationId!=='string'||!operationId||operationId.length>120||!money(amountCny)||amountCny<=0)throw error('语音调用报价或身份无效');
+      if(service!=='speech'||!['requested','automatic','preview'].includes(purpose)||typeof operationId!=='string'||!operationId||operationId.length>120||!money(amountCny)||amountCny<=0)throw error('语音调用报价或身份无效');
       if(characters!==undefined&&(!Number.isInteger(characters)||characters<1||characters>150)||voiceType!==undefined&&(!Number.isInteger(voiceType)||voiceType<=0))throw error('语音用量元数据无效');
       return storage.transaction(()=>{
         const context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(assertAuthorized);sync(p);syncService(context.conversationKey,limits);
@@ -311,7 +311,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         const token=Object.freeze({id:holds[0].id,key,operationId,amountCny});
         serviceTokens.set(token,{holds,assertAuthorized,authorization:hash(limits),requestId:context.requestId,sourceId:p.source.id,sourceVersion:p.source.version,state:'reserved'});
         const raw=storage.readText('call-attribution'),rows=raw===null?{}:JSON.parse(raw);
-        rows[token.id]={key,kind:'speech',provider:'tencent',mode:'platform-speech',ownerId:null,credentialRef:null,llmFundingMode:p.source.mode,llmOwnerId:p.source.ownerId||null,speechPurpose:purpose,model:'tencent-tts-premium',estimated:true,basis:'list-price-free-package-unsynchronized',...(characters===undefined?{}:{characters}),...(voiceType===undefined?{}:{voiceType})};
+        rows[token.id]={key,kind:'speech',provider:'tencent',mode:'platform-speech',ownerId:null,credentialRef:null,llmFundingMode:p.source.mode,llmOwnerId:p.source.ownerId||null,speechPurpose:purpose,model:'tencent-tts',estimated:true,basis:'list-price-free-package-unsynchronized',...(characters===undefined?{}:{characters}),...(voiceType===undefined?{}:{voiceType})};
         storage.writeText('call-attribution',JSON.stringify(rows),raw);return token;
       });
     },

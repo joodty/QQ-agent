@@ -32,6 +32,7 @@ import { createPlatformBusiness } from './platform-business.js';
 import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
 import { createSpeechUsage } from './speech-usage.js';
+import { TENCENT_SPEECH_SAMPLE_ORIGINS } from './speech-voices.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -1554,7 +1555,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
             "script-src 'self' 'sha256-xBF5qExTuqfXHlYtKYaaldGJshQgQOr5zvcGHjbPL7w=' https://o.alicdn.com https://kondius.cn",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob: http: https:",
-            "media-src 'self' data: blob:",
+            "media-src 'self' data: blob:" + (TENCENT_SPEECH_SAMPLE_ORIGINS.length ? ' ' + TENCENT_SPEECH_SAMPLE_ORIGINS.join(' ') : ''),
             "connect-src 'self' https://kondius.cn https://*.aliyuncs.com https://*.alicdn.com",
             "frame-src https://*.aliyuncs.com https://*.alicdn.com https://kondius.cn",
             "worker-src 'self' blob: https://*.alicdn.com https://kondius.cn",

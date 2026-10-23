@@ -1,18 +1,9 @@
 // Tencent's official TextToVoice endpoint. No browser Read-Aloud or fallback API.
 import crypto from 'node:crypto';
+import { TENCENT_SPEECH_VOICES } from './speech-voices.js';
+export { TENCENT_SPEECH_VOICES } from './speech-voices.js';
 
 export const TENCENT_SPEECH = Object.freeze({ endpoint:'https://tts.tencentcloudapi.com/',host:'tts.tencentcloudapi.com',action:'TextToVoice',version:'2019-08-23',voiceType:101001,voiceName:'智瑜',currency:'CNY',rateCnyPer10k:.3 });
-// Verified against Tencent's basic TextToVoice catalogue (2026-10-23).
-// https://cloud.tencent.com/document/product/1073/92668
-// All entries are 精品音色, Chinese, 16 kHz, and share the .3 CNY/10k list price.
-export const TENCENT_SPEECH_VOICES=Object.freeze([
-  {voiceType:101001,name:'智瑜',gender:'female',style:'情感女声'},
-  {voiceType:101055,name:'智付',gender:'female',style:'通用女声'},
-  {voiceType:101026,name:'智希',gender:'female',style:'通用女声'},
-  {voiceType:101004,name:'智云',gender:'male',style:'通用男声'},
-  {voiceType:101030,name:'智柯',gender:'male',style:'通用男声'},
-  {voiceType:101013,name:'智辉',gender:'male',style:'新闻男声'}
-].map(v=>Object.freeze({...v,language:'zh-CN',category:'premium',sampleRate:16000,rateCnyPer10k:.3})));
 export const SPEECH_VOICE_LIMITS=Object.freeze({speedMin:-1,speedMax:2,volumeMin:-5,volumeMax:5,precision:2});
 const plain=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const fail=(code,dispatched=false)=>Object.assign(new Error(code),{code,dispatched,chargeOutcome:dispatched?'unknown':'not_sent'});
@@ -36,7 +27,9 @@ export function validateSpeechCredential(value) {
     ||value.sessionToken!==undefined&&(typeof value.sessionToken!=='string'||value.sessionToken.length<16||value.sessionToken.length>8192||/[^\x21-\x7e]/.test(value.sessionToken)))throw fail('SPEECH_CREDENTIAL_INVALID');
   return {...value};
 }
-export function quoteSpeechText(text,{maxChars=150}={}) {
+export function quoteSpeechText(text,{maxChars=150,voiceType=101001}={}) {
+  validateSpeechVoiceOptions({voiceType});
+  const voice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voiceType);
   if(typeof text!=='string'||!text.isWellFormed()||!text.trim()||!Number.isSafeInteger(maxChars)||maxChars<1||maxChars>150
     ||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)||/[<>]/.test(text))throw fail('SPEECH_TEXT_INVALID');
   // A UTF-16 unit count is exact for Chinese/ASCII and conservatively counts
@@ -44,13 +37,18 @@ export function quoteSpeechText(text,{maxChars=150}={}) {
   const characters=text.length;
   // No SSML, normalization or silent truncation: quote exactly what is sent.
   if(characters>maxChars||Buffer.byteLength(text,'utf8')>450)throw fail('SPEECH_TEXT_TOO_LONG');
-  return {text,characters,amountCny:Math.ceil(characters*30)/1e6,currency:'CNY',estimated:true,basis:'list-price-free-package-unsynchronized'};
+  // Catalogue list prices are first-tier per 10k characters, not a browser rate.
+  // Round once to integer micro-CNY before entering the shared budget ledger.
+  const microsPerCharacter=voice.rateCnyPer10k*100;
+  if(!Number.isSafeInteger(microsPerCharacter)||microsPerCharacter<=0)throw fail('SPEECH_VOICE_INVALID');
+  return {text,characters,voiceType:voice.voiceType,category:voice.category,rateCnyPer10k:voice.rateCnyPer10k,amountCny:Math.ceil(characters*microsPerCharacter)/1e6,currency:'CNY',estimated:true,basis:'list-price-free-package-unsynchronized'};
 }
 export function signTencentSpeech({text,credentials,sessionId,timestamp=Math.floor(Date.now()/1000),voiceType=101001,speed=0,volume=0}) {
-  const credential=validateSpeechCredential(credentials);quoteSpeechText(text);
+  const credential=validateSpeechCredential(credentials);quoteSpeechText(text,{voiceType});
   const voice=validateSpeechVoiceOptions({voiceType,speed,volume});
+  const metadata=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voice.voiceType);
   if(typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(sessionId)||!Number.isSafeInteger(timestamp)||timestamp<0)throw fail('SPEECH_REQUEST_INVALID');
-  const body=JSON.stringify({Text:text,SessionId:sessionId,ModelType:1,VoiceType:voice.voiceType,Speed:voice.speed,Volume:voice.volume,PrimaryLanguage:1,SampleRate:16000,Codec:'wav'});
+  const body=JSON.stringify({Text:text,SessionId:sessionId,ModelType:1,VoiceType:voice.voiceType,Speed:voice.speed,Volume:voice.volume,PrimaryLanguage:/^en(?:-|$)/.test(metadata.language)?2:1,SampleRate:metadata.sampleRate,Codec:'wav'});
   const date=new Date(timestamp*1000).toISOString().slice(0,10),contentType='application/json; charset=utf-8';
   const canonical='POST\n/\n\ncontent-type:'+contentType+'\nhost:'+TENCENT_SPEECH.host+'\n\ncontent-type;host\n'+digest(body);
   const scope=date+'/tts/tc3_request',toSign='TC3-HMAC-SHA256\n'+timestamp+'\n'+scope+'\n'+digest(canonical);
@@ -98,7 +96,7 @@ export function createTencentSpeechProvider({fetch:request=(...args)=>globalThis
           ||result.Audio.length>1400000||result.Audio.length%4!==0||!/^[A-Za-z0-9+/]*={0,2}$/.test(result.Audio))throw fail('SPEECH_RESPONSE_INVALID',true);
         const audio=Buffer.from(result.Audio,'base64');
         if(audio.length<44||audio.length>1024*1024||audio.subarray(0,4).toString()!=='RIFF'||audio.subarray(8,12).toString()!=='WAVE')throw fail('SPEECH_AUDIO_INVALID',true);
-        return {audio,mime:'audio/wav',requestId:result.RequestId,characters:quoteSpeechText(text).characters};
+        return {audio,mime:'audio/wav',requestId:result.RequestId,characters:quoteSpeechText(text,{voiceType}).characters};
       } catch(error) {
         if(!dispatched)throw error;
         if(controller.signal.aborted)throw fail(timedOut?'SPEECH_TIMEOUT':'SPEECH_CANCELLED',dispatched);

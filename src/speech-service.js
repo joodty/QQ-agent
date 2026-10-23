@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { getConfig } from './config.js';
 import { productionPaidCallGuard,runWithPaidConversation,capturePaidFunding,capturePaidAuthority,assertPaidAuthority } from './paid-call-guard.js';
-import { createTencentSpeechProvider,validateSpeechCredential,quoteSpeechText,validateSpeechVoiceOptions,safeTencentSpeechErrorCode,TENCENT_SPEECH,TENCENT_SPEECH_VOICES,SPEECH_VOICE_LIMITS } from './speech-provider.js';
+import { createTencentSpeechProvider,validateSpeechCredential,quoteSpeechText,validateSpeechVoiceOptions,safeTencentSpeechErrorCode,TENCENT_SPEECH_VOICES,SPEECH_VOICE_LIMITS } from './speech-provider.js';
 
 const APP_ID=0x51535048,SCHEMA=3;
 const key=x=>typeof x==='string'&&/^(group|private):[1-9]\d*$/.test(x)&&Number.isSafeInteger(Number(x.split(':')[1]));
@@ -16,6 +16,9 @@ const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex'
 const fail=(code,statusCode=403,outcome='not_sent')=>Object.assign(new Error(code),{code,statusCode,dispatched:outcome!=='not_sent',chargeOutcome:outcome});
 const parse=text=>{try{return JSON.parse(text);}catch{throw fail('SPEECH_STORAGE_INVALID',503);}};
 const DEFAULT_PLATFORM={version:1,enabled:false,maxChars:120,cooldownMs:60000,dailyLimitCny:1,voiceType:101001,speed:0,volume:0,autoVoicePercent:0};
+const ESTIMATION_BOUNDARY='按所选音色类别首档标价估算；免费资源包实际抵扣未同步，阶梯折扣与实收账单未同步。';
+const PREVIEW_TEXT='你好呀，我是你的智能聊天伙伴。';
+const PREVIEW_ENGLISH_TEXT='Hi, dear friend';
 const percent=x=>Number.isSafeInteger(x)&&x>=0&&x<=100;
 const voiceValid=v=>{try{validateSpeechVoiceOptions(v);return true;}catch{return false;}};
 const validPlatform=p=>exact(p,['version','enabled','maxChars','cooldownMs','dailyLimitCny','voiceType','speed','volume','autoVoicePercent'])&&Number.isSafeInteger(p.version)&&p.version>=1&&typeof p.enabled==='boolean'&&Number.isSafeInteger(p.maxChars)&&p.maxChars>=1&&p.maxChars<=150&&Number.isSafeInteger(p.cooldownMs)&&p.cooldownMs>=1000&&p.cooldownMs<=3600000&&money(p.dailyLimitCny)&&Object.hasOwn(p,'voiceType')&&Object.hasOwn(p,'speed')&&Object.hasOwn(p,'volume')&&percent(p.autoVoicePercent)&&voiceValid(p);
@@ -50,7 +53,7 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     });
     if(db.prepare('PRAGMA user_version').get().user_version!==SCHEMA)throw fail('SPEECH_STORAGE_INVALID',503);
   } catch(error){db.close();throw fail('SPEECH_STORAGE_INVALID',503);}
-  const receipts=new WeakMap();let activeSyntheses=0,closed=false;
+  const receipts=new WeakMap(),previewRequests=new WeakMap();let activeSyntheses=0,closed=false;
   function platform(){const p=parse(db.prepare("SELECT value_json FROM speech_meta WHERE name='platform'").get()?.value_json);if(!validPlatform(p))throw fail('SPEECH_STORAGE_INVALID',503);return p;}
   function fresh(principal){try{return auth.verifyPrincipal(principal);}catch{throw fail('SPEECH_UNAUTHENTICATED',401);}}
   function scope(principal,chatKey,write=false){const p=fresh(principal);if(!key(chatKey)||!auth.canAccess(p,chatKey,{botId:'primary',write}))throw fail('SPEECH_ACCESS_DENIED');return p;}
@@ -68,15 +71,16 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     if(!grant.enabled||!grant.allowedFundingModes.includes(funding?.mode)||grant.dailyLimitCny<=0||p.dailyLimitCny<=0)reason=reason||'SPEECH_SUBSIDY_REQUIRED';
     const voice=validateSpeechVoiceOptions({voiceType:row?.voice_type??p.voiceType,speed:row?.speed??p.speed,volume:row?.volume??p.volume});
     const settings={version:row?.version||0,enabled:Boolean(row?.enabled),maxChars:Math.min(row?.max_chars??p.maxChars,p.maxChars),cooldownMs:Math.max(row?.cooldown_ms??p.cooldownMs,p.cooldownMs),...voice,autoVoicePercent:row?.auto_voice_percent??p.autoVoicePercent,overrides:{voiceType:row?.voice_type??null,speed:row?.speed??null,volume:row?.volume??null,autoVoicePercent:row?.auto_voice_percent??null}};
-    const version=hash([p,settings,grant,secret?hash(secret):null,funding]),voiceName=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voice.voiceType).name;
-    return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,policyVersion:version,rateCnyPer10k:.3,currency:'CNY',estimated:true,estimationBoundary:'按标价估算；免费资源包实际抵扣未同步。'},secret,funding,version};
+    const selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voice.voiceType);
+    const version=hash([p,settings,grant,secret?hash(secret):null,funding,selectedVoice.category,selectedVoice.rateCnyPer10k]);
+    return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName:selectedVoice.name,category:selectedVoice.category,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,policyVersion:version,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY},secret,funding,version};
   }
   function changed(chatKey){orchestrator?.archiveChanged?.(chatKey);}
   const service={
     runtimePolicy(chatKey){return projection(chatKey).public;},
     settings(principal,chatKey){scope(principal,chatKey);return projection(chatKey).public;},
     overview(principal){const p=fresh(principal);return {platform:service.platformOverview(p,{publicOnly:true}),conversations:auth.listScopes(p,{botId:'primary'}).map(k=>projection(k).public)};},
-    platformOverview(principal,{publicOnly=false}={}){const p=fresh(principal),settings=platform();let configured=false;try{configured=Boolean(credential());}catch{}return {...settings,configured,provider:'tencent',voiceName:TENCENT_SPEECH_VOICES.find(v=>v.voiceType===settings.voiceType).name,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,rateCnyPer10k:.3,currency:'CNY',estimated:true,estimationBoundary:'按标价估算；免费资源包实际抵扣未同步。',...(p.role==='admin'&&!publicOnly?{subsidies:db.prepare('SELECT chat_key FROM speech_subsidies ORDER BY chat_key').all().map(r=>subsidy(r.chat_key))}:{})};},
+    platformOverview(principal,{publicOnly=false}={}){const p=fresh(principal),settings=platform(),selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===settings.voiceType);let configured=false;try{configured=Boolean(credential());}catch{}return {...settings,configured,provider:'tencent',voiceName:selectedVoice.name,category:selectedVoice.category,voices:TENCENT_SPEECH_VOICES,voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY,...(p.role==='admin'&&!publicOnly?{subsidies:db.prepare('SELECT chat_key FROM speech_subsidies ORDER BY chat_key').all().map(r=>subsidy(r.chat_key))}:{})};},
     updateSettings(principal,fields){
       if(!exact(fields,['chatKey','expectedVersion','enabled','maxChars','cooldownMs','voiceType','speed','volume','autoVoicePercent']))throw fail('SPEECH_SETTINGS_INVALID',400);
       scope(principal,fields.chatKey,true);
@@ -97,30 +101,47 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     },
     updatePlatform(principal,fields){admin(principal);if(!exact(fields,['expectedVersion','enabled','maxChars','cooldownMs','dailyLimitCny','voiceType','speed','volume','autoVoicePercent']))throw fail('SPEECH_SETTINGS_INVALID',400);return transact(()=>{const old=platform();if(fields.expectedVersion!==old.version)throw fail('SPEECH_VERSION_CONFLICT',409);const next={...old,...Object.fromEntries(Object.entries(fields).filter(([k])=>k!=='expectedVersion')),version:old.version+1};if(!validPlatform(next))throw fail('SPEECH_SETTINGS_INVALID',400);if(next.enabled&&!credential())throw fail('SPEECH_NO_CREDENTIAL');db.prepare("UPDATE speech_meta SET value_json=? WHERE name='platform'").run(JSON.stringify(next));for(const row of db.prepare('SELECT chat_key FROM speech_scopes').all())changed(row.chat_key);return service.platformOverview(principal);});},
     updateSubsidy(principal,fields){admin(principal);if(!exact(fields,['chatKey','expectedVersion','enabled','allowedFundingModes','dailyLimitCny'])||!key(fields.chatKey)||typeof fields.enabled!=='boolean'||!Array.isArray(fields.allowedFundingModes)||!fields.allowedFundingModes.length||new Set(fields.allowedFundingModes).size!==fields.allowedFundingModes.length||fields.allowedFundingModes.some(m=>!['platform','trial','byok'].includes(m))||!money(fields.dailyLimitCny)||fields.enabled&&fields.dailyLimitCny<=0)throw fail('SPEECH_SUBSIDY_INVALID',400);scope(principal,fields.chatKey,true);return transact(()=>{const old=subsidy(fields.chatKey);if(fields.expectedVersion!==old.version)throw fail('SPEECH_VERSION_CONFLICT',409);db.prepare('INSERT INTO speech_subsidies VALUES(?,?,?,?,?) ON CONFLICT(chat_key) DO UPDATE SET version=excluded.version,enabled=excluded.enabled,modes_json=excluded.modes_json,daily_limit_micros=excluded.daily_limit_micros').run(fields.chatKey,old.version+1,fields.enabled?1:0,JSON.stringify(fields.allowedFundingModes),Math.round(fields.dailyLimitCny*1e6));changed(fields.chatKey);return subsidy(fields.chatKey);});},
-    assertCurrent(receipt){const captured=receipts.get(receipt);if(!captured)throw fail('SPEECH_RECEIPT_INVALID');const current=projection(captured.key);if(!current.public.allowed||current.version!==captured.version)throw fail('SPEECH_AUTHORIZATION_CHANGED');assertPaidAuthority(captured.key,captured.authority);store?.assertArchiveCurrent?.(captured.key,captured.archive);if(captured.signal?.aborted)throw fail('SPEECH_CANCELLED');return true;},
-    async synthesize(chatKey,{text,operationId=crypto.randomUUID(),signal,direct=false,purpose='requested',automaticSelected=false}={}) {
+    assertCurrent(receipt){const captured=receipts.get(receipt);if(!captured)throw fail('SPEECH_RECEIPT_INVALID');const current=projection(captured.key);if(!current.public.allowed||current.version!==captured.version)throw fail('SPEECH_AUTHORIZATION_CHANGED');captured.assertPreviewAuthority?.();assertPaidAuthority(captured.key,captured.authority);store?.assertArchiveCurrent?.(captured.key,captured.archive);if(captured.signal?.aborted)throw fail('SPEECH_CANCELLED');return true;},
+    async preview(principal,fields,{signal}={}){
+      if(!exact(fields,['chatKey','voiceType','expectedPolicyVersion'])||Object.keys(fields).length!==3||typeof fields.expectedPolicyVersion!=='string'||!/^\w{64}$/.test(fields.expectedPolicyVersion))throw fail('SPEECH_SETTINGS_INVALID',400);
+      scope(principal,fields.chatKey,true);validateSpeechVoiceOptions({voiceType:fields.voiceType});
+      const voice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===fields.voiceType),previewText=/^en(?:-|$)/.test(voice.language)?PREVIEW_ENGLISH_TEXT:PREVIEW_TEXT;
+      const assertAuthority=()=>{scope(principal,fields.chatKey,true);if(projection(fields.chatKey).version!==fields.expectedPolicyVersion)throw fail('SPEECH_VERSION_CONFLICT',409);};
+      assertAuthority();if(signal?.aborted)throw fail('SPEECH_CANCELLED');
+      // The opaque request object never leaves this closure. Public synthesize
+      // callers cannot choose an unsaved voice or invoke this trusted purpose.
+      const request={text:previewText,direct:true,purpose:'preview',signal};previewRequests.set(request,{voiceType:fields.voiceType,assertAuthority});
+      const result=await service.synthesize(fields.chatKey,request);assertAuthority();service.assertCurrent(result.receipt);
+      if(signal?.aborted)throw fail('SPEECH_CANCELLED');
+      return {audioBase64:result.audio.toString('base64'),mime:result.mime,characters:previewText.length,estimatedCostCny:result.estimatedCostCny,rateCnyPer10k:voice.rateCnyPer10k,estimated:true};
+    },
+    async synthesize(chatKey,request={}) {
+      const {text,operationId=crypto.randomUUID(),signal,direct=false,purpose='requested',automaticSelected=false}=request;
+      const preview=previewRequests.get(request);previewRequests.delete(request);
       let token=null,dispatched=false,settled=false,ledger,slot=false;
       try {
-        if(!['requested','automatic'].includes(purpose)||purpose==='requested'&&direct!==true||purpose==='automatic'&&automaticSelected!==true)throw fail('SPEECH_EXPLICIT_REQUEST_REQUIRED');
+        if(preview?purpose!=='preview':!['requested','automatic'].includes(purpose)||purpose==='requested'&&direct!==true||purpose==='automatic'&&automaticSelected!==true)throw fail('SPEECH_EXPLICIT_REQUEST_REQUIRED');
+        preview?.assertAuthority();
         return await runWithPaidConversation(chatKey,async()=>{
           const initial=projection(chatKey);if(!initial.public.allowed)throw fail(initial.public.reason);
           if(purpose==='automatic'&&initial.public.settings.autoVoicePercent<=0)throw fail('SPEECH_AUTOMATIC_DISABLED');
           if(signal?.aborted)throw fail('SPEECH_CANCELLED');
-          const quoted=quoteSpeechText(text,{maxChars:initial.public.settings.maxChars});
+          const selectedVoiceType=preview?.voiceType??initial.public.settings.voiceType;
+          const quoted=quoteSpeechText(text,{maxChars:initial.public.settings.maxChars,voiceType:selectedVoiceType});
           const receipt=Object.freeze({id:crypto.randomUUID(),chatKey});
-          receipts.set(receipt,{key:chatKey,version:initial.version,authority:capturePaidAuthority(chatKey),archive:store?.captureArchive?.(chatKey)||null,signal});
+          receipts.set(receipt,{key:chatKey,version:initial.version,authority:capturePaidAuthority(chatKey),archive:store?.captureArchive?.(chatKey)||null,signal,assertPreviewAuthority:preview?.assertAuthority});
           const assertAuthorized=()=>{service.assertCurrent(receipt);const current=projection(chatKey);return {id:'tencent-speech-platform',version:current.version,scopeDailyLimitCny:current.public.subsidy.dailyLimitCny,platformDailyLimitCny:platform().dailyLimitCny,cooldownMs:current.public.settings.cooldownMs};};
           // One application process is enforced by the app's instance lock.
           // Keep audio/body allocations bounded; excess requests never queue here.
           if(activeSyntheses>=2)throw fail('SPEECH_BUSY',429);
           activeSyntheses++;slot=true;
           ledger=guard();if(!ledger)throw fail('SPEECH_BUDGET_UNAVAILABLE',503);
-          token=ledger.prepareService({service:'speech',operationId,amountCny:quoted.amountCny,assertAuthorized,purpose,characters:quoted.characters,voiceType:initial.public.settings.voiceType});
-          const {voiceType,speed,volume}=initial.public.settings;
+          token=ledger.prepareService({service:'speech',operationId,amountCny:quoted.amountCny,assertAuthorized,purpose,characters:quoted.characters,voiceType:selectedVoiceType});
+          const {speed,volume}=initial.public.settings,voiceType=selectedVoiceType;
           const audio=await provider.synthesize({text:quoted.text,credentials:initial.secret,voiceType,speed,volume,signal,timeoutMs:config()?.speech?.timeoutMs,beforeRequest(){service.assertCurrent(receipt);ledger.dispatchService(token);dispatched=true;}});
           if(!dispatched)throw fail('SPEECH_PROVIDER_INVALID',503);
           ledger.settleService(token);settled=true;service.assertCurrent(receipt);
-          return {...audio,transcript:quoted.text,receipt,estimatedCostCny:quoted.amountCny,estimated:true,estimationBoundary:'按标价估算；免费资源包实际抵扣未同步。'};
+          return {...audio,transcript:quoted.text,receipt,estimatedCostCny:quoted.amountCny,estimated:true,estimationBoundary:ESTIMATION_BOUNDARY};
         });
       } catch(error){
         if(token&&!settled){try{if(dispatched)ledger.unknownService(token,error?.code==='SPEECH_CANCELLED'?'cancelled':'provider_error');else ledger.releaseService(token);}catch{throw fail('SPEECH_LEDGER_UNAVAILABLE',503,dispatched?'unknown':'not_sent');}}
