@@ -15,7 +15,7 @@ test('workspace loading separates first settings, authenticated state and public
  const f=await createWorkspaceFixture();t.after(()=>f.close());
  const html=fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),script=fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8');
  const windows=[],errors=[];t.after(()=>windows.forEach(w=>w.close()));
- async function mount({view='speech',hook=null,stored=null,crypto=true,quota=false,fastTimeout=false,cookie=f.cookie}={}){
+ async function mount({view='speech',hook=null,stored=null,crypto=true,quota=false,fastTimeout=false,cookie=f.cookie,inspectEditors=false}={}){
   const console=new VirtualConsole();console.on('jsdomError',error=>errors.push(error.message));
   const dom=new JSDOM(html,{url:f.origin+'/workspace.html#'+view,runScripts:'outside-only',virtualConsole:console}),w=dom.window;windows.push(w);
   w.matchMedia=()=>({matches:false});w.AbortController=globalThis.AbortController;
@@ -25,7 +25,7 @@ test('workspace loading separates first settings, authenticated state and public
   if(fastTimeout){const timeout=w.setTimeout.bind(w);w.setTimeout=(fn,ms,...rest)=>timeout(fn,ms===12000?60:ms,...rest);}
   const wire={cookie,hook},trace=[];
   w.fetch=async(route,options={})=>{const url=new URL(route,f.origin);trace.push({path:url.pathname,search:url.search,method:options.method||'GET'});const forward=()=>fetch(url,{...options,headers:{...options.headers,cookie:wire.cookie,origin:f.origin}});return wire.hook?wire.hook(url,options,forward):forward();};
-  w.eval(script);return {w,d:w.document,wire,trace};
+  w.eval(script+(inspectEditors?'\nglobalThis.__editorsForTest=()=>({credential:state.editCredential,account:state.editAccount});':''));return {w,d:w.document,wire,trace};
  }
  const ready=x=>waitFor(()=>x.d.querySelector('form[data-action="save-speech-settings"]'),5000,'speech settings shown');
  const go=async(x,view,selector)=>{x.w.location.hash=view;await waitFor(()=>x.d.querySelector(selector),5000,'view '+view);};
@@ -74,6 +74,19 @@ test('workspace loading separates first settings, authenticated state and public
   const second=await f.auth.register({username:'fixture_loading_second',password:'fixture-loading-second-pass'});x.wire.cookie=f.auth.cookie(second.token).split(';')[0];x.wire.hook=null;x.d.querySelector('[data-retry-load]').click();
   await waitFor(()=>x.d.querySelector('.empty-state h2')?.textContent==='先验证本人 QQ');assert.match(x.d.getElementById('user-label').textContent,/fixture_loading_second/);assert.equal(x.d.querySelector('#chat-selector'),null);
   assert.ok(x.trace.filter(row=>row.path==='/api/auth/status').length>=2);assert.doesNotMatch(x.w.localStorage.getItem(CACHE_KEY),/fixture_loading_second|fixture_user/);
+ });
+ await t.test('account switching clears credential and account editors before delayed identity confirmation',async()=>{
+  const adminLogin=await f.auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'}),adminCookie=f.auth.cookie(adminLogin.token).split(';')[0],admin=f.auth.authenticate(adminCookie);
+  f.business.saveCredential(admin,{name:'Old administrator editor metadata',endpoint:'https://api.deepseek.com',model:'deepseek-flash',apiKey:'fixture-editor-isolation-key',enabled:true});
+  const x=await mount({view:'accounts',cookie:adminCookie,inspectEditors:true});await waitFor(()=>x.d.querySelector('[data-action="edit-account"]'));x.d.querySelector('[data-action="edit-account"]').click();assert.ok(x.d.querySelector('form[data-action="save-account"]'));
+  await go(x,'keys','#credential-name');x.d.querySelector('[data-action="edit-credential"]').click();assert.equal(x.d.getElementById('credential-name').value,'Old administrator editor metadata');assert.ok(x.w.__editorsForTest().account);
+  const second=await f.auth.register({username:'fixture_editor_second',password:'fixture-editor-second-pass'}),gate=deferred();let checking=false;x.wire.cookie=f.auth.cookie(second.token).split(';')[0];
+  x.wire.hook=async(url,options,forward)=>{if(url.pathname==='/api/auth/status'){checking=true;await gate.promise;}return forward();};x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>checking);
+  assert.equal(x.d.querySelector('form[data-action="save-credential"]'),null);assert.equal(x.d.getElementById('main').getAttribute('aria-busy'),'true');assert.doesNotMatch(x.d.getElementById('main').textContent,/Old administrator editor metadata/);
+  assert.equal(x.w.__editorsForTest().credential,null);assert.equal(x.w.__editorsForTest().account,null);
+  gate.resolve();await waitFor(()=>x.d.getElementById('credential-name')&&x.d.getElementById('user-label').textContent.includes('fixture_editor_second'));assert.equal(x.d.getElementById('credential-name').value,'');assert.equal(x.d.getElementById('credential-key').required,true);assert.doesNotMatch(x.d.getElementById('main').textContent,/Old administrator editor metadata/);
+  x.wire.hook=async(url,options,forward)=>url.pathname==='/api/platform/overview'?json({...await (await forward()).json(),accountId:'fixture-expired-identity'}):url.pathname==='/api/auth/status'?json({authenticated:false}):forward();
+  x.d.querySelector('[data-action="refresh"]').click();await waitFor(()=>x.d.querySelector('[data-retry-load]'));assert.match(x.d.getElementById('main').textContent,/登录账号已变化/);assert.equal(x.d.getElementById('main').hasAttribute('aria-busy'),false);assert.equal(x.d.querySelector('form[data-action="save-credential"]'),null);
  });
  await t.test('a cleared cache cannot be repopulated by a credential request that started before the mutation',async()=>{
   const x=await mount({view:'home'});await waitFor(()=>x.d.querySelector('.chat-list'));const gate=deferred(),parsed=deferred();let held=false;
