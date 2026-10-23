@@ -73,4 +73,4 @@ node scripts/install-reviewed-extensions.mjs --lock ABSOLUTE_RELEASE/extensions.
 
 天气在服务器隔离暂存中作了一次公开城市查询，真实免费 HTTP 200、约 774 ms；本次验证未发起模型探测或 QQ 测试消息。禁言/解禁消费和天气异常响应边界由隔离夹具验证，没有为验证插件而实际禁言机器人或群友。原包私有缓存、安装 receipt 和锁文件保留，每次 release 按同一流程重放。
 
-语音暂未纳入首批。市场描述中的 `free-tts` 2.0.0、`voice-send` 1.5.0 声称提供免 Key 在线路径，但其代码、服务规则和平台发送边界尚未审验；Windows 离线语音及需本机模型服务的其他项也不能直接当成当前节点可用的能力。
+语音没有纳入首批。后续已静态审阅 `free-tts` 2.0.0、`voice-send` 1.5.0 并核对正规云费用，发现实际适配缺口；未安装或启用。免 Key 路径不是长期免费承诺，详见 [语音调研](VOICE_RESEARCH.md)。
