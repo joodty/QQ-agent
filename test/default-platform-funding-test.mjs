@@ -74,6 +74,14 @@ test('default platform subsidy uses the shared engine with exact authority and p
   assert.equal((await save({defaultPlatformFunding:true})).status,200);assert.equal(f.business.runtimeAllowed('private:999'),true);assert.throws(()=>paid.assertPaidAuthority('private:999',token));
   assert.deepEqual(paid.productionPaidCallGuard().records(),before);assert.equal(paid.productionPaidCallGuard().status('group:789').dailyLimitCny,.3);
  });
+ await t.test('existing private trial funding uses the same lower daily limit in the page and actual ledger',async()=>{
+  const registered=await f.auth.register({username:'fixture_trial_user',password:'fixture-trial-pass-2026'}),person=f.auth.authenticate(f.auth.cookie(registered.token).split(';')[0]),proof=f.auth.issueBinding(person,{qq:'889'});
+  assert.equal(f.auth.consumeBinding({private:true,qq:'889',text:proof.command}).ok,true);
+  f.business.updateBudget(admin,{trialDailyLimitCny:.2});f.business.setFunding(person,{chatKey:'private:889',mode:'platform'});
+  assert.equal(f.business.funding(person,'private:889').dailyLimitCny,.1);assert.equal(paid.productionPaidCallGuard().status('private:889').dailyLimitCny,.1);
+  assert.equal((await save({defaultDailyLimitCny:.05})).status,200);assert.equal(f.business.funding(person,'private:889').dailyLimitCny,.05);assert.equal(paid.productionPaidCallGuard().status('private:889').dailyLimitCny,.05);
+  assert.equal((await save({defaultDailyLimitCny:.1})).status,200);
+ });
  await t.test('the 0.1 ceiling constrains concurrent reservations, survives restart and retains uncertain charges across Beijing midnight',async sub=>{
   const storage=paid.createPaidCallStorage(path.join(f.root,'fixture-small-default.sqlite'));let clock=Date.parse('2026-10-23T15:59:00Z');let guard=paid.createPaidCallGuard({storage,config:getConfig,now:()=>clock});
   sub.after(()=>storage.close());let hold;
