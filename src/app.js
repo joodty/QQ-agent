@@ -30,6 +30,7 @@ import { createRoutes } from './routes.js';
 import { createPlatformAuth } from './platform-auth.js';
 import { createPlatformBusiness } from './platform-business.js';
 import {createChatIdentityStore,createChatIdentitySync} from './chat-identities.js';
+import {createPlatformMessages} from './platform-messages.js';
 import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
 import { createSpeechUsage } from './speech-usage.js';
@@ -666,8 +667,10 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     if (!match || !Number.isSafeInteger(Number(match[2]))) return false;
     try { return resourceAllowed(match[1], match[2], getConfig()); } catch { return false; }
   } });
+  const manualMessageCapability=Object.freeze({});
   const sender =   new SendQueue({
     onebot, store,
+    manualCapability:manualMessageCapability,
     canSend: chatKey => !departedGroups.has(chatKey),
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
     log
@@ -710,6 +713,11 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
     archives, store, orchestrator, auth: platformAuth, config: getConfig
   }) : null;
+  let platformMessages=null;
+  if(platformEnabled){
+    try{platformMessages=createPlatformMessages({file:path.join(DATA_DIR,'manual-messages.sqlite'),auth:platformAuth,store,onebot,config:getConfig,canReach:chatKey=>!departedGroups.has(chatKey),sendText:(chatKey,text,options)=>sender.sendManualText(chatKey,text,{...options,capability:manualMessageCapability})});}
+    catch{const unavailable=()=>{throw Object.assign(Error('人工发送回执暂不可用，原资料已保留'),{statusCode:503});};platformMessages={targets:unavailable,result:unavailable,send:unavailable,broadcast:unavailable,close:async()=>{}};log('[人工发送] 回执库暂不可用，原资料保留');}
+  }
   const speechService = platformEnabled ? createSpeechService({
     file: path.join(DATA_DIR, 'speech.sqlite'), auth: platformAuth, store, orchestrator, config: getConfig,
     ...(speechCredentials === undefined ? {} : { credentials: speechCredentials })
@@ -1410,7 +1418,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   // 路由 handler 通过闭包取用这些依赖，handleHttp 只负责匹配分发。
   const apiRoutes = createRoutes({
     store, memory, sessions, onebot, orchestrator,
-    platformAuth, platformBusiness,speechService,chatIdentities,
+    platformAuth, platformBusiness,speechService,chatIdentities,platformMessages,
     emit, log,
     localVersion, compareSemver, UPDATE_INFO_URL,
     sanitizeConfig, keyEndpointAllowed, sanitizeProvider,
@@ -1788,6 +1796,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   }
 
   async function stop() {
+    const manualMessagesClosing=platformMessages?.close();
     stickerIngressReady = false;
     await stickers.close();
     if (groupPermissionTimer) clearInterval(groupPermissionTimer);
@@ -1800,6 +1809,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     orchestrator.stopReminderLoop();
     await orchestrator.whenArchiveIdle?.();
     await sender.whenIdle?.();
+    await manualMessagesClosing;
     speechService?.close();
     platformBusiness?.close();
     platformAuth?.close();

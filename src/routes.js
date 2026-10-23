@@ -1629,7 +1629,7 @@ export function createRoutes(deps) {
 
 /** Public workspace services always receive a server-verified Cookie principal.
  * Native administrator tokens alone cannot impersonate a resource owner. */
-export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, chatIdentities, readBody, onebot, orchestrator }) {
+export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, chatIdentities, platformMessages, readBody, onebot, orchestrator }) {
   if(!auth)return [];
   const replySettings=createReplySettings({auth,onChanged:chatKey=>orchestrator?.replySettingsChanged?.(chatKey)});
   // Names are display metadata only. Never load message histories to label a
@@ -1646,6 +1646,10 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     return ctx.json(ctx.res, 200, await work(principal, input));
   }});
   return [
+    get('messages/targets',principal=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.targets(principal);}),
+    get('messages/result',(principal,query)=>{if([...query.keys()].some(key=>key!=='requestId')||query.getAll('requestId').length!==1)throw Object.assign(Error('请求编号无效'),{statusCode:400});if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.result(principal,query.get('requestId'));}),
+    write('POST','messages/send',(principal,input)=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.send(principal,input);}),
+    write('POST','messages/broadcast',(principal,input)=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.broadcast(principal,input);}),
     get('reply-settings',(principal,query)=>{
       if([...query.keys()].some(name=>name!=='chatKey')||query.getAll('chatKey').length!==1)throw Object.assign(Error('请选择一个群聊或私聊'),{statusCode:400});
       return replySettings.get(principal,query.get('chatKey'));

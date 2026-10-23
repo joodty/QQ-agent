@@ -42,12 +42,14 @@ export function toFileUri(input) {
 }
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null, log = null, canSend = () => true }) {
+  #manualCapability;
+  constructor({ onebot, store, onSent = null, log = null, canSend = () => true, manualCapability = null }) {
     if (typeof canSend !== 'function') throw new TypeError('canSend must be a synchronous function');
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
     this.canSend = canSend;
+    this.#manualCapability = manualCapability;
     // 回退/降级这类"行为变了但没报错"的事必须留痕，否则排查时看不到曾经降级过
     this.log = typeof log === 'function' ? log : null;
     this.chains = new Map();      // chatKey -> enqueue fn
@@ -176,6 +178,24 @@ export class SendQueue {
     if (isLast) return 0;
     const byLength = Math.min(8000, (String(text || '').length) * (Number(cfg.byLengthMs) || 20));
     return Math.min(15000, Math.max(min, randInt(min, max) * 0.5 + byLength * 0.5));
+  }
+
+  // This capability is created by the application, never exposed to a model or
+  // browser. Manual account actions share queues/rates/history with AI sends,
+  // but do not pretend that a model funding source authorized a human message.
+  sendManualText(chatKey,text,{capability,guard,beforeDispatch,selection}={}) {
+    if(!capability||capability!==this.#manualCapability||typeof guard!=='function'||typeof beforeDispatch!=='function')throw Object.assign(Error('人工发送未获授权'),{code:'MANUAL_SEND_DENIED'});
+    const check=()=>{this.#assertCanSend(chatKey);const result=guard();if(result===false||result?.then)throw Object.assign(Error('人工发送权限已变化'),{code:'MANUAL_SEND_DENIED'});this.store.assertArchiveCurrent?.(chatKey,selection);};
+    check();
+    return this.#chain(chatKey)(async()=>{
+      check();this.#checkRate(chatKey);check();beforeDispatch();
+      const [kind,id]=chatKey.split(':');
+      const data=await this.onebot.sendText(kind,id,text,{timeoutMs:10000});
+      if(!Number.isSafeInteger(data?.message_id)||data.message_id===0)throw Object.assign(Error('QQ未返回可确认的消息编号'),{code:'MANUAL_SEND_UNKNOWN'});
+      try{this.#record(chatKey,{text,ts:Date.now(),mid:data.message_id},selection);this.onSent?.({chatKey,text,messageId:data.message_id});}
+      catch(error){error.messageId=data.message_id;throw error;}
+      return {messageId:data.message_id,historyRecorded:true};
+    });
   }
 
   /**

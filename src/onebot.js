@@ -316,12 +316,12 @@ export class OneBotClient {
   }
 
   /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind, id, segments) {
+  async sendSegments(kind, id, segments, { timeoutMs } = {}) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
       : { group_id: Number(id), message: segments };
-    return this.call(action, params);
+    return this.call(action, params, timeoutMs);
   }
 
   /**
@@ -348,10 +348,10 @@ export class OneBotClient {
     return segments;
   }
 
-  async sendText(kind, id, text, { replyToMessageId = null, atUserId = null } = {}) {
+  async sendText(kind, id, text, { replyToMessageId = null, atUserId = null, timeoutMs } = {}) {
     const segments = OneBotClient.#replyAtSegments({ replyToMessageId, atUserId });
     segments.push({ type: 'text', data: { text: escapeCqText(String(text ?? '')) } });
-    return this.sendSegments(kind, id, segments);
+    return this.sendSegments(kind, id, segments, { timeoutMs });
   }
 
   async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
