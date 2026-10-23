@@ -34,10 +34,10 @@ export async function createWorkspaceFixture({empty=false,admin=false,speechCred
  if(!empty){const proof=auth.issueBinding(user,{qq:'777'});auth.consumeBinding({private:true,qq:'777',text:proof.command});auth.store.grant(user.id,'group:789');}
  const archives=new ConversationArchives({file:path.join(root,'conversation-archives.sqlite')}),store=new ChatStore(0,{archives});
  business=createPlatformBusiness({file:path.join(root,'platform-business.sqlite'),keyFile:path.join(root,'platform-business.key'),archives,store,orchestrator:{archiveChanged(){}},auth,config:getConfig});
- const {createSpeechService}=await import('../src/speech-service.js'),{createSpeechRoutes}=await import('../src/speech-routes.js');
+ const {createSpeechService}=await import('../src/speech-service.js'),{createSpeechRoutes}=await import('../src/speech-routes.js'),{createSpeechUsage}=await import('../src/speech-usage.js');
  const speech=createSpeechService({file:path.join(root,'speech.sqlite'),auth,store,config:getConfig,...(speechCredentials===undefined?{}:{credentials:speechCredentials})});
  routes=createPlatformResourceRoutes({platformAuth:auth,platformBusiness:business,onebot:{selfId:'888'},orchestrator:{chatNameCache:new Map([['789','朋友们的读书和日常闲聊群']])},readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}});
- routes.push(...createSpeechRoutes({auth,service:speech,readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}}));
+ routes.push(...createSpeechRoutes({auth,service:speech,usage:createSpeechUsage({file:path.join(root,'paid-calls.sqlite'),auth}),readBody:async req=>{let text='';for await(const part of req)text+=part;return JSON.parse(text||'{}');}}));
  const activeCookie=admin?auth.cookie((await auth.login({username:'fixture_admin',password:'fixture-admin-pass-2026'})).token).split(';')[0]:cookie;
  const principal=auth.authenticate(activeCookie);
  return {root,server,origin,auth,business,speech,archives,store,principal,cookie:activeCookie,calls,

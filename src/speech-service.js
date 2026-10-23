@@ -115,7 +115,7 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
           if(activeSyntheses>=2)throw fail('SPEECH_BUSY',429);
           activeSyntheses++;slot=true;
           ledger=guard();if(!ledger)throw fail('SPEECH_BUDGET_UNAVAILABLE',503);
-          token=ledger.prepareService({service:'speech',operationId,amountCny:quoted.amountCny,assertAuthorized,purpose});
+          token=ledger.prepareService({service:'speech',operationId,amountCny:quoted.amountCny,assertAuthorized,purpose,characters:quoted.characters,voiceType:initial.public.settings.voiceType});
           const {voiceType,speed,volume}=initial.public.settings;
           const audio=await provider.synthesize({text:quoted.text,credentials:initial.secret,voiceType,speed,volume,signal,timeoutMs:config()?.speech?.timeoutMs,beforeRequest(){service.assertCurrent(receipt);ledger.dispatchService(token);dispatched=true;}});
           if(!dispatched)throw fail('SPEECH_PROVIDER_INVALID',503);

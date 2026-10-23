@@ -5,7 +5,7 @@ function publicProjection(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'reason' && typeof item === 'string' && item.startsWith('SPEECH_') ? speechErrorMessage(item) : publicProjection(item)]));
 }
-export function createSpeechRoutes({ service, auth, readBody }) {
+export function createSpeechRoutes({ service, usage, auth, readBody }) {
   const access = async (principal, chatKey, write = false) => {
     if (!chatKey) throw Object.assign(Error('请先选择群聊或私聊'), { statusCode: 400 });
     await auth.ensureAccess(principal, chatKey, { botId: 'primary', write });
@@ -20,6 +20,15 @@ export function createSpeechRoutes({ service, auth, readBody }) {
     }
   }});
   return [
+    route('GET', 'usage', (principal, ctx) => {
+      if (!usage) throw Object.assign(Error('语音用量统计尚未启用'), { statusCode: 503 });
+      const fields = {};
+      for (const [name, value] of ctx.url.searchParams) {
+        if (!['chatKey','days','from','to'].includes(name) || Object.hasOwn(fields, name)) throw Object.assign(Error('语音用量查询参数无效'), { statusCode: 400 });
+        fields[name] = name === 'days' && /^(1|7|30|90)$/.test(value) ? Number(value) : value;
+      }
+      return usage.usage(principal, fields);
+    }),
     route('GET', 'overview', principal => service.overview(principal)),
     route('GET', 'settings', async (principal, ctx) => { const key = ctx.url.searchParams.get('chatKey'); await access(principal, key); return service.settings(principal, key); }),
     route('PUT', 'settings', async (principal, ctx) => { const input = await readBody(ctx.req); await access(principal, input.chatKey, true); return service.updateSettings(principal, input); }),

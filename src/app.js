@@ -31,6 +31,7 @@ import { createPlatformAuth } from './platform-auth.js';
 import { createPlatformBusiness } from './platform-business.js';
 import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
+import { createSpeechUsage } from './speech-usage.js';
 import * as instanceLockModule from './instance-lock.js';
 import { logger } from './logger.js';
 import { startCommunitySync, isGloballyBlocked, FIXED_PRICE_FEED_URL } from './community.js';
@@ -1400,7 +1401,9 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     buildUsageStats, buildUsageBreakdown,
     reloadSkills
   });
-  apiRoutes.push(...createSpeechRoutes({ service: speechService, auth: platformAuth, readBody }));
+  apiRoutes.push(...createSpeechRoutes({ service: speechService, auth: platformAuth, readBody,
+    usage: platformAuth ? createSpeechUsage({ file: path.join(DATA_DIR, 'paid-calls.sqlite'), auth: platformAuth }) : null
+  }));
 
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
