@@ -455,8 +455,14 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
 
   // 私聊恒响应：1v1 场景下消息本来就是发给机器人的，
   // 没有 @ 机制，不该套用群聊的"被艾特/关键词/随机"档位。
-  if (isPrivate) {
+  if (isPrivate && !Number.isInteger(c.replyPercent)) {
     return { tier: 4, count: historyCount(), reason: '私聊消息', shouldRespond: true };
+  }
+  if(isPrivate){
+    const threshold=Math.max(0,Math.min(100,c.replyPercent));
+    const value=roll===null||roll===undefined?Math.random()*100:Number(roll);
+    const hit=Number.isFinite(value)&&value>=0&&value<100&&value<threshold;
+    return hit?{tier:3,count:historyCount(),reason:`私聊随机命中(${value.toFixed(0)}%)`,shouldRespond:true}:{tier:0,count:0,reason:'私聊未命中回复概率',shouldRespond:false};
   }
 
   // 注意：不能用 `Number(x) || 4` —— 0 是 falsy，会被误当成"未设置"回落到 4。

@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getConfig, updateConfig, deepMerge as deepMergeConfig, DATA_DIR } from './config.js';
+import {createReplySettings} from './reply-settings.js';
 import { customSearch } from './web-search.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices } from './model-prices.js';
@@ -1629,6 +1630,7 @@ export function createRoutes(deps) {
 /** Public workspace services always receive a server-verified Cookie principal.
  * Native administrator tokens alone cannot impersonate a resource owner. */
 export function createPlatformResourceRoutes({ platformAuth: auth, platformBusiness: business, speechService, chatIdentities, readBody, onebot, orchestrator }) {
+  const replySettings=createReplySettings({auth,onChanged:chatKey=>orchestrator?.replySettingsChanged?.(chatKey)});
   // Names are display metadata only. Never load message histories to label a
   // chat, or let a slow QQ lookup delay the workspace overview/settings.
   const get = (path, work) => ({ method: 'GET', pattern: '/api/platform/' + path, handler: async ctx => {
@@ -1643,6 +1645,11 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     return ctx.json(ctx.res, 200, await work(principal, input));
   }});
   return [
+    get('reply-settings',(principal,query)=>{
+      if([...query.keys()].some(name=>name!=='chatKey')||query.getAll('chatKey').length!==1)throw Object.assign(Error('请选择一个群聊或私聊'),{statusCode:400});
+      return replySettings.get(principal,query.get('chatKey'));
+    }),
+    write('PUT','reply-settings',(principal,input)=>replySettings.update(principal,input)),
     get('chat-identities', async (principal, query) => {
       for (const field of query.keys()) if (field !== 'chatKey') throw Object.assign(Error('聊天查询参数无效'), {statusCode:400});
       if (query.getAll('chatKey').length > 1) throw Object.assign(Error('聊天查询参数无效'), {statusCode:400});

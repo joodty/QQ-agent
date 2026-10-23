@@ -266,6 +266,7 @@ export const DEFAULT_CONFIG = {
     historyCount: 80,           // 各档统一：响应时随【已读信息】带多少条历史
     keywords: [],               // 2 档的关键词表
     randomPercent: 10,          // 3 档：y% 概率
+    replyByChat: {},            // { 'group:ID'|'private:ID': {version,replyPercent:null|0..100} }
     // ── 提示词锚点（前缀缓存深化，2026-09-25）──
     // 连续触发时，把上一轮发给模型的【记忆】+【已读信息】前缀**原样复用**：
     // 本轮只在其后追加新沉淀的已读条目（"新已读信息"），新增群友的印象放到
@@ -692,12 +693,14 @@ export function personaForChat(chatKey) {
  * 峰谷切换：peakSchedule.enabled 时，先按当前时间判定落在高峰/低谷时段，
  * 用该时段的 sliderPos 换算出档位**覆盖**全局滑条（在 unifiedTier / 分群设置之前生效）。
  */
-export function storeConfigForChat(chatKey) {
+export function storeConfigForChat(chatKey,{ignoreReplyOverride=false}={}) {
   const store = getConfig().store || {};
+  const row=ignoreReplyOverride?null:store.replyByChat?.[chatKey];
+  const replyPercent=Number.isInteger(row?.replyPercent)&&row.replyPercent>=0&&row.replyPercent<=100?row.replyPercent:null;
   // ── 指令禁言：该群被禁言且未到期 → 强制 1 档（仅艾特）──
   const mutedTier = commandMuteTier(chatKey);
   if (mutedTier !== null) {
-    return { ...store, contextTier: 1, randomPercent: 0 };
+    return { ...store, contextTier: 1, randomPercent: 0,...(replyPercent===null?{}:{replyPercent:0}) };
   }
   const [kind, id] = String(chatKey || '').split(':');
   const isGroup = kind === 'group' && !!id;
@@ -727,6 +730,7 @@ export function storeConfigForChat(chatKey) {
     if (gp !== undefined && gp !== null) pos = clampSliderPos(gp);
   }
   const { tier, randomPercent } = sliderToTier(pos);
+  if(replyPercent!==null)return {...store,contextSliderPos:pos,contextTier:replyPercent===100?4:3,randomPercent:replyPercent,replyPercent};
   return { ...store, contextSliderPos: pos, contextTier: tier, randomPercent };
 }
 

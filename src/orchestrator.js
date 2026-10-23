@@ -303,6 +303,9 @@ export class Orchestrator {
    */
   #activeState(chatKey) {
     const cfg = getConfig();
+    // Explicit per-chat probability must also govern daily messages during an
+    // active topic. Keep the saved topic so null inheritance restores old mode.
+    if(Number.isInteger(storeConfigForChat(chatKey).replyPercent))return null;
     if (cfg.chatActive?.enabled !== true) {
       if (this.activeTopics.size) this.activeTopics.delete(chatKey);
       return null;
@@ -1949,6 +1952,21 @@ export class Orchestrator {
   }
 
   // ── 控制接口 ───────────────────────────────────────────────────────────
+
+  replySettingsChanged(chatKey) {
+    // Revoke only pending trigger decisions made with the previous probability.
+    // Already running work, history and the legacy active topic stay intact.
+    const timer = this.wakeTimers.get(chatKey);
+    if (timer) clearTimeout(timer);
+    this.wakeTimers.delete(chatKey);
+    this.#cancelUnreadFallback(chatKey);
+    this.pendingWake.delete(chatKey);
+    this.verifiedWakes.delete(chatKey);
+    const waiting = this.pendingSessions.get(chatKey);
+    this.pendingSessions.delete(chatKey);
+    if (waiting) this.#discardWaiting(waiting);
+    this.emit('chat-update', chatKey);
+  }
 
   archiveChanged(chatKey) {
     const timer = this.wakeTimers.get(chatKey);
