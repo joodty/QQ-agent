@@ -54,7 +54,7 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     });
     if(db.prepare('PRAGMA user_version').get().user_version!==SCHEMA)throw fail('SPEECH_STORAGE_INVALID',503);
   } catch(error){db.close();throw fail('SPEECH_STORAGE_INVALID',503);}
-  const receipts=new WeakMap(),previewRequests=new WeakMap();let activeSyntheses=0,closed=false;
+  const receipts=new WeakMap(),previewRequests=new WeakMap(),accountRequests=new WeakMap();let activeSyntheses=0,closed=false;
   function platform(){const p=parse(db.prepare("SELECT value_json FROM speech_meta WHERE name='platform'").get()?.value_json);if(!validPlatform(p))throw fail('SPEECH_STORAGE_INVALID',503);return p;}
   function fresh(principal){try{return auth.verifyPrincipal(principal);}catch{throw fail('SPEECH_UNAUTHENTICATED',401);}}
   function scope(principal,chatKey,write=false){const p=fresh(principal);if(!key(chatKey)||!auth.canAccess(p,chatKey,{botId:'primary',write}))throw fail('SPEECH_ACCESS_DENIED');return p;}
@@ -77,7 +77,28 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName:selectedVoice.name,category:selectedVoice.category,...(compact?{voiceCatalog:TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC}:{voices:TENCENT_SPEECH_VOICES}),voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,policyVersion:version,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY},secret,funding,version};
   }
   function changed(chatKey){orchestrator?.archiveChanged?.(chatKey);}
+  function accountProjection(principal,fields){
+    scope(principal,fields.chatKey,true);const current=projection(fields.chatKey,{compact:true}),voice=validateSpeechVoiceOptions({voiceType:fields.voiceType,speed:fields.speed??current.public.settings.speed,volume:fields.volume??current.public.settings.volume}),quoted=quoteSpeechText(fields.text,{maxChars:150,voiceType:voice.voiceType}),selected=TENCENT_SPEECH_VOICES.find(row=>row.voiceType===voice.voiceType);
+    return {current,voice,quoted,selected,version:hash([current.version,voice,hash(quoted.text),quoted.characters,quoted.amountCny,selected.category,selected.rateCnyPer10k])};
+  }
   const service={
+    assertAccountDelivery(receipt){
+      service.assertCurrent(receipt);const captured=receipts.get(receipt),current=projection(captured.key),ledger=guard();if(!ledger)throw fail('SPEECH_BUDGET_UNAVAILABLE',503);
+      const extra=ledger.serviceStatus(captured.key,{id:'tencent-speech-platform',version:current.version,scopeDailyLimitCny:current.public.subsidy.dailyLimitCny,platformDailyLimitCny:platform().dailyLimitCny,cooldownMs:current.public.settings.cooldownMs}),checks=[ledger.status(captured.key),extra.scope,extra.platform,...(current.funding?.mode==='trial'?[ledger.trialStatus()]:[])];
+      if(checks.some(row=>row.action!=='normal'))throw fail('SPEECH_ADMISSION_DENIED');return true;
+    },
+    quoteForAccount(principal,fields){
+      const {current,voice,quoted,selected,version}=accountProjection(principal,fields);let reason=current.public.reason,capacity=null;
+      if(quoted.characters>current.public.settings.maxChars)reason='SPEECH_TEXT_TOO_LONG';
+      if(!reason){const ledger=guard();if(!ledger)reason='SPEECH_BUDGET_UNAVAILABLE';else{const limits={id:'tencent-speech-platform',version:current.version,scopeDailyLimitCny:current.public.subsidy.dailyLimitCny,platformDailyLimitCny:platform().dailyLimitCny,cooldownMs:current.public.settings.cooldownMs},extra=ledger.serviceStatus(fields.chatKey,limits),main=ledger.status(fields.chatKey),trial=current.funding?.mode==='trial'?ledger.trialStatus():null,checks=[main,extra.scope,extra.platform,...(trial?[trial]:[])];if(checks.some(row=>row.action!=='normal'||row.spentCny+row.reservedCny+quoted.amountCny>=row.dailyLimitCny*.8))reason='SPEECH_ADMISSION_DENIED';capacity={platformCny:extra.platform.dailyLimitCny*.8-extra.platform.spentCny-extra.platform.reservedCny,trialCny:trial?trial.dailyLimitCny*.8-trial.spentCny-trial.reservedCny:null};}}
+      return {allowed:!reason,reason,characters:quoted.characters,maxChars:current.public.settings.maxChars,estimatedCostCny:quoted.amountCny,rateCnyPer10k:selected.rateCnyPer10k,policyVersion:version,...voice,capacity};
+    },
+    async synthesizeForAccount(principal,fields,{assertAuthority,beforeRequest,signal}={}){
+      if(!exact(fields,['chatKey','text','voiceType','speed','volume','expectedPolicyVersion','operationId'])||typeof assertAuthority!=='function'||typeof beforeRequest!=='function')throw fail('SPEECH_SETTINGS_INVALID',400);
+      const initial=accountProjection(principal,fields),check=()=>{scope(principal,fields.chatKey,true);const result=assertAuthority();if(result===false||result?.then)throw fail('SPEECH_ACCESS_DENIED');if(accountProjection(principal,fields).version!==fields.expectedPolicyVersion)throw fail('SPEECH_VERSION_CONFLICT',409);};
+      check();const request={text:fields.text,operationId:fields.operationId,direct:true,purpose:'requested',signal};accountRequests.set(request,{...initial.voice,assertAuthority:check,beforeRequest});
+      return service.synthesize(fields.chatKey,request);
+    },
     runtimePolicy(chatKey){return projection(chatKey).public;},
     settings(principal,chatKey,{compact=false}={}){scope(principal,chatKey);return projection(chatKey,{compact}).public;},
     overview(principal,{compact=false}={}){const p=fresh(principal);if(compact)return {platform:service.platformOverview(p,{publicOnly:true,compact:true})};return {platform:service.platformOverview(p,{publicOnly:true}),conversations:auth.listScopes(p,{botId:'primary'}).map(k=>projection(k).public)};},
@@ -118,19 +139,19 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     },
     async synthesize(chatKey,request={}) {
       const {text,operationId=crypto.randomUUID(),signal,direct=false,purpose='requested',automaticSelected=false}=request;
-      const preview=previewRequests.get(request);previewRequests.delete(request);
+      const preview=previewRequests.get(request),account=accountRequests.get(request),trusted=account||preview;previewRequests.delete(request);accountRequests.delete(request);
       let token=null,dispatched=false,settled=false,ledger,slot=false;
       try {
         if(preview?purpose!=='preview':!['requested','automatic'].includes(purpose)||purpose==='requested'&&direct!==true||purpose==='automatic'&&automaticSelected!==true)throw fail('SPEECH_EXPLICIT_REQUEST_REQUIRED');
-        preview?.assertAuthority();
+        trusted?.assertAuthority();
         return await runWithPaidConversation(chatKey,async()=>{
           const initial=projection(chatKey);if(!initial.public.allowed)throw fail(initial.public.reason);
           if(purpose==='automatic'&&initial.public.settings.autoVoicePercent<=0)throw fail('SPEECH_AUTOMATIC_DISABLED');
           if(signal?.aborted)throw fail('SPEECH_CANCELLED');
-          const selectedVoiceType=preview?.voiceType??initial.public.settings.voiceType;
+          const selectedVoiceType=trusted?.voiceType??initial.public.settings.voiceType;
           const quoted=quoteSpeechText(text,{maxChars:initial.public.settings.maxChars,voiceType:selectedVoiceType});
           const receipt=Object.freeze({id:crypto.randomUUID(),chatKey});
-          receipts.set(receipt,{key:chatKey,version:initial.version,authority:capturePaidAuthority(chatKey),archive:store?.captureArchive?.(chatKey)||null,signal,assertPreviewAuthority:preview?.assertAuthority});
+          receipts.set(receipt,{key:chatKey,version:initial.version,authority:capturePaidAuthority(chatKey),archive:store?.captureArchive?.(chatKey)||null,signal,assertPreviewAuthority:trusted?.assertAuthority});
           const assertAuthorized=()=>{service.assertCurrent(receipt);const current=projection(chatKey);return {id:'tencent-speech-platform',version:current.version,scopeDailyLimitCny:current.public.subsidy.dailyLimitCny,platformDailyLimitCny:platform().dailyLimitCny,cooldownMs:current.public.settings.cooldownMs};};
           // One application process is enforced by the app's instance lock.
           // Keep audio/body allocations bounded; excess requests never queue here.
@@ -138,8 +159,8 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
           activeSyntheses++;slot=true;
           ledger=guard();if(!ledger)throw fail('SPEECH_BUDGET_UNAVAILABLE',503);
           token=ledger.prepareService({service:'speech',operationId,amountCny:quoted.amountCny,assertAuthorized,purpose,characters:quoted.characters,voiceType:selectedVoiceType});
-          const {speed,volume}=initial.public.settings,voiceType=selectedVoiceType;
-          const audio=await provider.synthesize({text:quoted.text,credentials:initial.secret,voiceType,speed,volume,signal,timeoutMs:config()?.speech?.timeoutMs,beforeRequest(){service.assertCurrent(receipt);ledger.dispatchService(token);dispatched=true;}});
+          const speed=account?.speed??initial.public.settings.speed,volume=account?.volume??initial.public.settings.volume,voiceType=selectedVoiceType;
+          const audio=await provider.synthesize({text:quoted.text,credentials:initial.secret,voiceType,speed,volume,signal,timeoutMs:config()?.speech?.timeoutMs,beforeRequest(){service.assertCurrent(receipt);account?.beforeRequest();ledger.dispatchService(token);dispatched=true;}});
           if(!dispatched)throw fail('SPEECH_PROVIDER_INVALID',503);
           ledger.settleService(token);settled=true;service.assertCurrent(receipt);
           return {...audio,transcript:quoted.text,receipt,estimatedCostCny:quoted.amountCny,estimated:true,estimationBoundary:ESTIMATION_BOUNDARY};

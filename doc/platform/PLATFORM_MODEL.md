@@ -1,6 +1,6 @@
 # 平台数据模型与权限边界
 
-更新日期：2026-10-23。这里只描述公开结构；不展示任何真实账号、QQ、群、服务器、密码哈希或 API Key。源码与实际 schema 是权威，关系图中跨库连线是应用层约束，不代表 SQLite 跨文件外键。
+更新日期：2026-10-24。这里只描述公开结构；不展示任何真实账号、QQ、群、服务器、密码哈希或 API Key。源码与实际 schema 是权威，关系图中跨库连线是应用层约束，不代表 SQLite 跨文件外键。
 
 ## 业务对象
 
@@ -25,9 +25,21 @@ erDiagram
   CHAT_RESOURCE ||--o{ BUDGET_ATTEMPT : reserves
   CHAT_RESOURCE ||--o{ HISTORICAL_USAGE : accounts_for
   CONVERSATION_ARCHIVE o|--o{ AGENT_RUN : contextualizes
+  ACCOUNT ||--o{ MANUAL_REQUEST : submits
+  MANUAL_REQUEST ||--|{ MANUAL_RESULT : delivers
+  CHAT_RESOURCE ||--o{ MANUAL_RESULT : receives
 ```
 
 同群多位管理者共享同一个当前档案、费用来源和每日额度。人设保存为新版本，明确应用才切换档案；A → B → A 优先恢复原 A 档案。无论切换多少次，当天费用归属仍是同一群/私聊，不能靠新建人设重置预算。
+
+## 手动消息回执库 `manual-messages.sqlite`
+
+| 表 | 主键及关键字段 | 职责 |
+| --- | --- | --- |
+| `manual_requests` | `user_id + request_id`；payload_hash、kind、created_at | 统一单发/群发任务与请求幂等；正文只存摘要，不在回执库重复保存 |
+| `manual_results` | `user_id + request_id + ordinal`；chat_key、status、message_id、error、history_recorded、message_type、stage、tts_outcome、estimated_cost_micros | 每个目标的传输结果、原档案落盘标记及语音合成阶段；外键指向请求 |
+
+schema 2 保留 schema 1 文字回执，增加语音阶段字段。真实语音费用仍由统一预算账本管理，不把回执估算费用再统计一次。云合成与QQ传输结果未知均保留，不因重启重合成或重发。详见[手动消息](MANUAL_MESSAGES.md)。
 
 ## 独立账号库 `platform.sqlite`
 

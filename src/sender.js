@@ -198,6 +198,22 @@ export class SendQueue {
     });
   }
 
+  // A trusted speech adapter supplies the synthesis function. No browser URL,
+  // segments, or unaccounted TTS operation can enter this capability path.
+  sendManualSpeech(chatKey,{capability,guard,beforeDispatch,selection,build}={}){
+    if(!capability||capability!==this.#manualCapability||typeof guard!=='function'||typeof beforeDispatch!=='function'||typeof build!=='function')throw Object.assign(Error('人工发送未获授权'),{code:'MANUAL_SEND_DENIED'});
+    const check=()=>{this.#assertCanSend(chatKey);const result=guard();if(result===false||result?.then)throw Object.assign(Error('人工发送权限已变化'),{code:'MANUAL_SEND_DENIED'});this.store.assertArchiveCurrent?.(chatKey,selection);};check();
+    return this.#chain(chatKey)(async()=>{
+      check();this.#checkRate(chatKey);const built=await build();check();built.assertCurrent();
+      if(!Buffer.isBuffer(built.audio)||!built.audio.length||built.audio.length>5*1024*1024)throw Object.assign(Error('合成语音内容无效'),{code:'SPEECH_AUDIO_INVALID'});
+      beforeDispatch();const [kind,id]=chatKey.split(':'),data=await this.onebot.sendSegments(kind,id,[{type:'record',data:{file:'base64://'+built.audio.toString('base64')}}],{timeoutMs:10000});
+      if(!Number.isSafeInteger(data?.message_id)||data.message_id===0)throw Object.assign(Error('QQ未返回可确认的消息编号'),{code:'MANUAL_SEND_UNKNOWN'});
+      const text='[语音] '+built.transcript;
+      try{this.#record(chatKey,{text,ts:Date.now(),mid:data.message_id},selection);this.onSent?.({chatKey,text,messageId:data.message_id});}catch(error){error.messageId=data.message_id;throw error;}
+      return {messageId:data.message_id,historyRecorded:true};
+    });
+  }
+
   /**
    * 发送一批文本消息（一条或多条）。
    * options: { replyToMessageId, atUserId }

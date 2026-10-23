@@ -713,16 +713,16 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
     archives, store, orchestrator, auth: platformAuth, config: getConfig
   }) : null;
-  let platformMessages=null;
-  if(platformEnabled){
-    try{platformMessages=createPlatformMessages({file:path.join(DATA_DIR,'manual-messages.sqlite'),auth:platformAuth,store,onebot,config:getConfig,canReach:chatKey=>!departedGroups.has(chatKey),sendText:(chatKey,text,options)=>sender.sendManualText(chatKey,text,{...options,capability:manualMessageCapability})});}
-    catch{const unavailable=()=>{throw Object.assign(Error('人工发送回执暂不可用，原资料已保留'),{statusCode:503});};platformMessages={targets:unavailable,result:unavailable,send:unavailable,broadcast:unavailable,close:async()=>{}};log('[人工发送] 回执库暂不可用，原资料保留');}
-  }
   const speechService = platformEnabled ? createSpeechService({
     file: path.join(DATA_DIR, 'speech.sqlite'), auth: platformAuth, store, orchestrator, config: getConfig,
     ...(speechCredentials === undefined ? {} : { credentials: speechCredentials })
   }) : null;
   orchestrator.speech = speechService;
+  let platformMessages=null;
+  if(platformEnabled){
+    try{platformMessages=createPlatformMessages({file:path.join(DATA_DIR,'manual-messages.sqlite'),auth:platformAuth,store,onebot,speechService,config:getConfig,canReach:chatKey=>!departedGroups.has(chatKey),sendText:(chatKey,text,options)=>sender.sendManualText(chatKey,text,{...options,capability:manualMessageCapability}),sendSpeech:(chatKey,options)=>sender.sendManualSpeech(chatKey,{...options,capability:manualMessageCapability})});}
+    catch{const unavailable=()=>{throw Object.assign(Error('人工发送回执暂不可用，原资料已保留'),{statusCode:503});};platformMessages={targets:unavailable,result:unavailable,quote:unavailable,send:unavailable,broadcast:unavailable,close:async()=>{}};log('[人工发送] 回执库暂不可用，原资料保留');}
+  }
   let groupPermissionRefresh = null;
   const groupPermissionTimer = platformAuth ? setInterval(() => {
     if (groupPermissionRefresh) return;

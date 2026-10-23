@@ -1650,6 +1650,7 @@ export function createPlatformResourceRoutes({ platformAuth: auth, platformBusin
     get('messages/result',(principal,query)=>{if([...query.keys()].some(key=>key!=='requestId')||query.getAll('requestId').length!==1)throw Object.assign(Error('请求编号无效'),{statusCode:400});if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.result(principal,query.get('requestId'));}),
     write('POST','messages/send',(principal,input)=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.send(principal,input);}),
     write('POST','messages/broadcast',(principal,input)=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.broadcast(principal,input);}),
+    write('POST','messages/quote',(principal,input)=>{if(!platformMessages)throw Object.assign(Error('人工发送尚未启用'),{statusCode:503});return platformMessages.quote(principal,input);}),
     get('reply-settings',(principal,query)=>{
       if([...query.keys()].some(name=>name!=='chatKey')||query.getAll('chatKey').length!==1)throw Object.assign(Error('请选择一个群聊或私聊'),{statusCode:400});
       return replySettings.get(principal,query.get('chatKey'));
