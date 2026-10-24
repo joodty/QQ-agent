@@ -39,7 +39,24 @@ test('an unconfigured platform must provide an actual key rather than accepting 
 });
 test('failed configuration persistence leaves the original runtime and file unchanged',()=>{
  const f=fixture();updateConfig({api:{temperature:.6}});const before=structuredClone(getConfig()),persisted=fs.readFileSync(CONFIG_FILE),temporary=CONFIG_FILE+'.tmp';fs.mkdirSync(temporary);
- try{assert.throws(()=>f.service.update(f.admin,{expectedVersion:f.service.get(f.admin).version,endpoint:'https://api.deepseek.com',model:'fixture-model-b',apiKey:'fixture-uncommitted-key'}),e=>e.statusCode===503);assert.deepEqual(getConfig(),before);assert.deepEqual(fs.readFileSync(CONFIG_FILE),persisted);}finally{fs.rmdirSync(temporary);}
+ try{assert.throws(()=>f.service.update(f.admin,{expectedVersion:f.service.get(f.admin).version,endpoint:'https://api.deepseek.com',model:'fixture-model-b',apiKey:'fixture-uncommitted-key',thinkingEffort:''}),e=>e.statusCode===503);assert.deepEqual(getConfig(),before);assert.deepEqual(fs.readFileSync(CONFIG_FILE),persisted);}finally{fs.rmdirSync(temporary);}
+});
+
+test('native CommandCode catalogue exposes only model-specific legal thinking strengths without key reflection',()=>{
+ const f=fixture(),alpha='https://api.commandcode.ai/alpha',deepseek='deepseek/deepseek-v4.1-flash',glm='z-ai/glm-5.3-flash';
+ setRuntimeConfig({...getConfig(),api:{...getConfig().api,baseUrl:alpha,model:deepseek,provider:'',apiKey:'fixture-native-key',thinkingEffort:'high'},productionBudget:{...getConfig().productionBudget,endpoint:alpha,model:deepseek,approvedProviders:[{endpoint:alpha,model:glm,prices:expensive},{endpoint:alpha,model:'deepseek/deepseek-v4-flash',prices}]}});
+ const current=f.service.get(f.admin);assert.equal(current.thinkingEffort,'high');assert.deepEqual(current.thinkingEffortOptions,['','low','high','max']);
+ assert.deepEqual(current.providers.find(p=>p.model===glm).thinkingEffortOptions,['','low','high','max']);assert.deepEqual(current.providers.find(p=>p.model==='deepseek/deepseek-v4-flash').thinkingEffortOptions,['','high','max']);assert.doesNotMatch(JSON.stringify(current),/fixture-native-key|apiKey/);
+ const before=JSON.stringify(getConfig());for(const thinkingEffort of ['off','medium','xhigh','LOW',' high ',null,{}])assert.throws(()=>f.service.update(f.admin,{expectedVersion:current.version,endpoint:alpha,model:glm,thinkingEffort}),e=>e.statusCode===400);assert.equal(JSON.stringify(getConfig()),before);
+ const next=f.service.update(f.admin,{expectedVersion:current.version,endpoint:alpha,model:glm,apiKey:'',thinkingEffort:'max'});assert.equal(next.model,glm);assert.equal(next.thinkingEffort,'max');assert.equal(getConfig().api.thinkingMode,'auto');assert.equal(resolveApiKey(getConfig()),'fixture-native-key');assert.deepEqual(getConfig().productionBudget.prices,expensive);assert.equal(getConfig().productionBudget.model,glm);
+ assert.throws(()=>f.service.update(f.admin,{expectedVersion:current.version,endpoint:alpha,model:deepseek,thinkingEffort:'low'}),e=>e.statusCode===409);
+ const stored=JSON.parse(fs.readFileSync(CONFIG_FILE,'utf8'));assert.equal(stored.api.thinkingEffort,'max');assert.equal(stored.api.model,glm);assert.deepEqual(stored.productionBudget.prices,expensive);
+});
+
+test('a default-strength choice clears legacy on/off mode, while a key-only save preserves it',()=>{
+ const f=fixture();setRuntimeConfig({...getConfig(),api:{...getConfig().api,thinkingMode:'off',thinkingEffort:''}});
+ const old=f.service.get(f.admin),keyOnly=f.service.update(f.admin,{expectedVersion:old.version,endpoint:old.endpoint,model:old.model,apiKey:'fixture-only-key-update'});assert.equal(getConfig().api.thinkingMode,'off');
+ f.service.update(f.admin,{expectedVersion:keyOnly.version,endpoint:keyOnly.endpoint,model:keyOnly.model,thinkingEffort:''});assert.equal(getConfig().api.thinkingMode,'auto');assert.equal(getConfig().api.thinkingEffort,'');
 });
 test('the original model HTTP engine immediately uses the saved model/key with the matching paid admission price',async t=>{
  const f=fixture(),requests=[],server=http.createServer(async(req,res)=>{let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push({body,key:req.headers.authorization});res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({model:body.model,choices:[{message:{role:'assistant',content:'fixture answer'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const native=globalThis.fetch;

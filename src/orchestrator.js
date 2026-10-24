@@ -1105,6 +1105,7 @@ export class Orchestrator {
         role: 'assistant',
         content: finalContent,
         tool_calls: finalToolCalls,
+        ...(typeof msg.reasoning_content === 'string' ? { reasoning_content: msg.reasoning_content } : {}),
         raw: response.raw ?? null
       };
       messages.push(assistantEntry);

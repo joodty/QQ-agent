@@ -1,0 +1,92 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'qq-commandcode-llm-'));
+process.env.QQ_AGENT_DATA_DIR=dir;
+const {DEFAULT_CONFIG,getConfig,setRuntimeConfig}=await import('../src/config.js');
+const {chatCompletion,chatCompletionWithRetry,listModels}=await import('../src/llm.js');
+const {productionPaidCallGuard,closeProductionPaidCallGuard,runWithPaidConversation,setPaidCallFundingServices}=await import('../src/paid-call-guard.js');
+const endpoint='https://api.commandcode.ai/alpha',model='deepseek/deepseek-v4.1-flash';
+const tools=[{type:'function',function:{name:'fixture_check',description:'No external action',parameters:{type:'object',properties:{ok:{type:'boolean'}},required:['ok']}}}];
+const ndjson=events=>events.map(row=>JSON.stringify(row)).join('\n')+'\n';
+const usage={inputTokens:100,outputTokens:10,totalTokens:110,inputTokenDetails:{cacheReadTokens:40},outputTokenDetails:{reasoningTokens:2}};
+
+test('Command Code uses one guarded native request per tool or memory turn and fails closed on ambiguous replies',async t=>{
+ const previous=getConfig(),nativeFetch=globalThis.fetch;
+ closeProductionPaidCallGuard();
+ const cfg={...structuredClone(DEFAULT_CONFIG),api:{...structuredClone(DEFAULT_CONFIG.api),baseUrl:endpoint,model,apiKey:'fixture-commandcode-key',fallbackModels:[]},allow:{groups:['123'],private:[]},deny:{groups:[],private:[]},productionBudget:{enabled:true,endpoint,model,prices:{inputCnyPerMillion:2.4,cacheHitCnyPerMillion:.048,outputCnyPerMillion:9.6,reasoningIncluded:true},defaultDailyLimitCny:1,outputCap:128,overrides:{},initialSpent:{},funding:{'group:123':{mode:'platform',enabled:true}}}};
+ setRuntimeConfig(cfg);
+ t.after(()=>{globalThis.fetch=nativeFetch;setPaidCallFundingServices(null);closeProductionPaidCallGuard();setRuntimeConfig(previous);assert.ok(dir.startsWith(path.join(os.tmpdir(),'qq-commandcode-llm-')));fs.rmSync(dir,{recursive:true,force:true});});
+ const requests=[];
+ let respond=()=>ndjson([{type:'tool-call',toolCallId:'call_fixture',toolName:'fixture_check',input:{ok:true}},{type:'finish',finishReason:'tool-calls',totalUsage:usage}]);
+ globalThis.fetch=async(url,options)=>{
+  requests.push({url:String(url),options,body:JSON.parse(options.body)});
+  assert.equal(productionPaidCallGuard().records().at(-1).state,'dispatched');
+  const result=respond();return result instanceof Response?result:new Response(result,{status:200,headers:{'content-type':'application/x-ndjson'}});
+ };
+ const messages=[{role:'system',content:'Synthetic system fixture'},{role:'user',content:'Call fixture_check with ok=true.'}];
+ const first=await runWithPaidConversation('group:123',()=>chatCompletion({messages,tools,maxTokens:99999}));
+ assert.equal(requests.length,1);assert.equal(requests[0].url,endpoint+'/generate');
+ assert.equal(requests[0].body.params.max_tokens,128);
+ assert.equal(requests[0].options.headers.authorization,'Bearer fixture-commandcode-key');
+ assert.match(requests[0].options.headers['user-agent'],/^qq-agent\//);
+ assert.equal(first.message.tool_calls[0].function.name,'fixture_check');
+ assert.deepEqual(JSON.parse(first.message.tool_calls[0].function.arguments),{ok:true});
+ assert.equal(first.usage.prompt_tokens,100);assert.equal(first.usage.prompt_tokens_details.cached_tokens,40);
+ respond=()=>ndjson([{type:'text-delta',id:'text-1',text:'Synthetic result'},{type:'text-end',id:'text-1'},{type:'finish',finishReason:'stop',totalUsage:usage}]);
+ const assistantEntry={...first.message,raw:first.raw,inlineParsed:false,rescued:false};
+ const second=await runWithPaidConversation('group:123',()=>chatCompletion({messages:[...messages,assistantEntry,{role:'tool',tool_call_id:'call_fixture',name:'fixture_check',content:'{"ok":true}'}],tools}));
+ assert.equal(second.message.content,'Synthetic result');
+ assert.equal(requests[1].body.params.messages.at(-1).role,'tool');
+ assert.doesNotMatch(JSON.stringify(requests[1].body.params.messages),/chat\.completion|inlineParsed|rescued/);
+ await runWithPaidConversation('group:123',()=>chatCompletion({messages:[{role:'user',content:'Synthetic memory summary'}],purpose:'memory'}));
+ assert.equal(productionPaidCallGuard().records().filter(row=>row.state==='settled').length,3);
+ assert.match(JSON.stringify(requests[2].body.params.messages),/Synthetic memory summary/);
+ const expected=((100-40)*2.4+40*.048+10*9.6)/1e6;
+ assert.ok(Math.abs(productionPaidCallGuard().status('group:123').spentCny-3*expected)<.000004);
+
+ const beforeUnsupported=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletionWithRetry({messages,tools,toolChoice:'required'},2)),error=>String(error.code).startsWith('COMMANDCODE_'));
+ assert.equal(requests.length,beforeUnsupported);
+ assert.equal(productionPaidCallGuard().records().at(-1).state,'released');
+ respond=()=>ndjson([{type:'text-delta',id:'missing-usage',text:'Usage unavailable'},{type:'text-end',id:'missing-usage'},{type:'finish',finishReason:'stop'}]);
+ await runWithPaidConversation('group:123',()=>chatCompletion({messages}));
+ assert.equal(productionPaidCallGuard().records().at(-1).state,'unknown');
+ respond=()=>ndjson([{type:'text-delta',text:'Truncated'}]);
+ const beforeTruncated=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletionWithRetry({messages},2)),error=>String(error.code).startsWith('COMMANDCODE_'));
+ assert.equal(requests.length,beforeTruncated+1);assert.equal(productionPaidCallGuard().records().at(-1).state,'unknown');
+ respond=()=>new Response(JSON.stringify({error:{code:'upgrade_required',message:'Fixture access denied'}}),{status:403});
+ cfg.api.fallbackModels=[{model:'fixture-unapproved-fallback'}];
+ const beforeDenied=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletionWithRetry({messages},2)),{code:'COMMANDCODE_HTTP_403'});
+ assert.equal(requests.length,beforeDenied+1);
+ respond=()=>new Response(JSON.stringify({error:{code:'quota_exhausted',message:'Fixture exhausted quota'}}),{status:429,headers:{'Retry-After':'3600'}});
+ const beforeQuota=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletionWithRetry({messages},2)),{code:'COMMANDCODE_HTTP_429'});
+ assert.equal(requests.length,beforeQuota+1);
+ cfg.api.fallbackModels=[];
+ let cancelled=false;
+ respond=()=>new Response(new ReadableStream({pull(controller){controller.enqueue(new Uint8Array(2*1024*1024));},cancel(){cancelled=true;}}),{status:200});
+ const beforeOversize=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletionWithRetry({messages},2)),{code:'COMMANDCODE_RESPONSE_TOO_LARGE'});
+ assert.equal(requests.length,beforeOversize+1);assert.equal(cancelled,true);
+ assert.equal(productionPaidCallGuard().records().at(-1).state,'unknown');
+
+ // Endpoint selection follows the owner's resolved funding source, even though
+ // the platform default still uses the Command Code native protocol.
+ const ownEndpoint='https://owner.example.invalid/v1';
+ setPaidCallFundingServices({resolve:()=>({id:'fixture-owner',version:1,mode:'byok',ownerId:'fixture-owner',endpoint:ownEndpoint,model,prices:cfg.productionBudget.prices,apiKey:'fixture-owner-key',scopeAuthorized:true}),policy:()=>({})});
+ respond=()=>new Response(JSON.stringify({model,choices:[{message:{role:'assistant',content:'Own provider'}}],usage:{prompt_tokens:10,completion_tokens:1,total_tokens:11}}),{status:200});
+ const own=await runWithPaidConversation('group:123',()=>chatCompletion({messages}));
+ assert.equal(own.message.content,'Own provider');assert.equal(requests.at(-1).url,ownEndpoint+'/chat/completions');
+ assert.equal(requests.at(-1).body.stream,false);assert.equal(requests.at(-1).body.params,undefined);
+ assert.equal(requests.at(-1).options.headers.authorization,'Bearer fixture-owner-key');
+ const beforeCatalog=productionPaidCallGuard().records().length;
+ globalThis.fetch=async(url)=>{assert.equal(url,'https://api.commandcode.ai/provider/v1/models');return new Response(JSON.stringify({data:[{id:model}]}));};
+ assert.deepEqual(await listModels(),[{id:model}]);
+ assert.equal(productionPaidCallGuard().records().length,beforeCatalog);
+});

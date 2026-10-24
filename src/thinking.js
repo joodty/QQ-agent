@@ -16,6 +16,27 @@
 /** 本地/自建端点：不发花哨参数，避免把自建网关打挂。 */
 const LOCAL_HOSTS = /^(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]|host\.docker\.internal)$/i;
 
+// Read-only evidence: command-code@1.88.0 npm cli.mjs model catalogue and
+// createModelClient().complete() pass the chosen effort as params.reasoning_effort.
+// Catalogue capabilities differ per model. "off" is intentionally absent here:
+// its disabling semantics have not been verified for this transport.
+const COMMANDCODE_EFFORTS = Object.freeze({
+  'deepseek/deepseek-v4-pro': Object.freeze(['high', 'max']),
+  'deepseek/deepseek-v4-flash': Object.freeze(['high', 'max']),
+  'deepseek/deepseek-v4-flash-fast': Object.freeze(['low', 'high', 'max']),
+  'deepseek/deepseek-v4.1-flash': Object.freeze(['low', 'high', 'max']),
+  'deepseek/deepseek-v4.1-flash-fast': Object.freeze(['low', 'high', 'max']),
+  'z-ai/glm-5.3-flash': Object.freeze(['low', 'high', 'max']),
+  'z-ai/glm-5.3-flashx': Object.freeze(['low', 'high', 'max'])
+});
+function commandCodeEndpoint(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    return url.origin === 'https://api.commandcode.ai' && url.pathname.replace(/\/+$/, '') === '/alpha'
+      && !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
+}
+
 /**
  * 规则表：从上往下第一个命中的决定方言。
  *   host 命中条件（域名正则，null = 只看模型名）；model 模型正则
@@ -51,6 +72,7 @@ const MODEL_RULES = [
 
 /** 各方言的可读名称（UI 展示）。 */
 export const DIALECT_LABELS = {
+  commandcode: 'CommandCode 原生推理强度',
   deepseek: 'DeepSeek 思考',
   qwen: '通义千问思考',
   glm: '智谱 GLM 思考',
@@ -90,6 +112,7 @@ export function isLocalEndpoint(baseUrl) {
  * 识别方言。返回 { dialect, label, supports, reason }。
  */
 export function detectDialect({ baseUrl = '', model = '' } = {}) {
+  if (commandCodeEndpoint(baseUrl)) return { dialect: 'commandcode', label: DIALECT_LABELS.commandcode, supports: ['effort'], reason: '精确 CommandCode alpha 端点使用原生 reasoning_effort' };
   const host = hostOf(baseUrl) || String(baseUrl || '').toLowerCase();
   const id = String(model || '');
   const match = (rule) => {
@@ -108,6 +131,19 @@ export function detectDialect({ baseUrl = '', model = '' } = {}) {
     };
   }
   return { dialect: 'generic', label: DIALECT_LABELS.generic, supports: [], reason: '未命中任何方言规则' };
+}
+
+/** Exact values offered by the account management UI; empty means model default.
+ * Unknown CommandCode models expose no guessed reasoning capabilities. */
+export function thinkingEffortOptions(api = {}) {
+  const detected = detectDialect(api);
+  if (detected.dialect === 'commandcode') return ['', ...(COMMANDCODE_EFFORTS[api.model] || [])];
+  if (detected.dialect === 'openai-o') return ['', 'off', 'low', 'medium', 'high'];
+  if (detected.dialect === 'openrouter') return ['', 'low', 'medium', 'high'];
+  if (detected.dialect === 'xai') return ['', 'low', 'medium', 'high'];
+  if (detected.supports.includes('off') && detected.supports.includes('on')) return ['', 'off', 'high'];
+  if (detected.supports.includes('on')) return ['', 'high'];
+  return [''];
 }
 
 /** 明确列出会往请求体里加的键（降级重试时要把它们摘掉）。 */
@@ -157,7 +193,8 @@ export function resolveThinkingRequest(api = {}, context = {}) {
     dialect: det.dialect,
     dialectLabel: det.label,
     supports: det.supports,
-    reason: det.reason
+    reason: det.reason,
+    model: String(api.model || '')
   };
 }
 
@@ -169,7 +206,7 @@ export function resolveThinkingRequest(api = {}, context = {}) {
  *                   调用方需要删掉 temperature，否则被 400 顶回来
  *   applied         本次是否真的加了参数（false 时 UI 显示"未应用"）
  */
-export function buildThinkingParams({ effort = '', dialect = 'generic', budget = 0 } = {}) {
+export function buildThinkingParams({ effort = '', dialect = 'generic', budget = 0, model = '' } = {}) {
   const supports = (MODEL_RULES.find((r) => r.dialect === dialect)?.supports) || [];
   const e = normalizeEffort(effort);
   const on = Boolean(e) && e !== 'off';
@@ -183,6 +220,15 @@ export function buildThinkingParams({ effort = '', dialect = 'generic', budget =
   const eff = supports.includes('effort') && OPENAI_EFFORTS.includes(openaiEffort) ? openaiEffort : '';
 
   switch (dialect) {
+    case 'commandcode': {
+      // No vendor-specific thinking/budget field and no implied off switch.
+      // Explicit unsupported strengths are not silently downgraded to another.
+      if (e && e !== 'off') {
+        if (!(COMMANDCODE_EFFORTS[model] || []).includes(e)) throw Object.assign(new Error('当前 CommandCode 模型不支持该思考强度'), { code: 'COMMANDCODE_UNSUPPORTED_REASONING' });
+        params.reasoning_effort = e; applied = true;
+      }
+      break;
+    }
     case 'deepseek':
     case 'glm': {
       if (on) { params.thinking = { type: 'enabled' }; applied = true; omitTemperature = true; }

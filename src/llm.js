@@ -4,6 +4,7 @@ import { getConfig } from './config.js';
 import { resolveModelPrice, priceAt } from './model-prices.js';
 import { skillManager } from './skills/manager.js';
 import { productionPaidCallGuard, resolvePaidConversationApi, capturePaidAuthority } from './paid-call-guard.js';
+import { buildCommandCodeRequest, normalizeCommandCodeResponse, COMMANDCODE_RESPONSE_LIMIT } from './commandcode-transport.js';
 import {
   resolveThinkingRequest, buildThinkingParams, stripThinkingParams,
   looksLikeThinkingRejection, extractReasoning, extractReasoningTokens, THINKING_BODY_KEYS
@@ -11,6 +12,25 @@ import {
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
+}
+
+async function readCommandCodeResponse(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const decoder = new TextDecoder(); let bytes = 0, text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > COMMANDCODE_RESPONSE_LIMIT) throw Object.assign(Error('Command Code response exceeds the transport size limit'), { code: 'COMMANDCODE_RESPONSE_TOO_LARGE' });
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    try { await reader.cancel(); } catch {}
+    reader.releaseLock();
+  }
 }
 
 function authHeaders(apiKey, baseUrl = '', model = '') {
@@ -166,6 +186,7 @@ function buildCandidateApis() {
  */
 export function isRetryableError(error) {
   if (String(error?.code || '').startsWith('PAID_')) return false;
+  if (String(error?.code || '').startsWith('COMMANDCODE_')) return false;
   const msg = String(error?.message ?? error ?? '');
 
   // 主动中止（用户/系统取消）：重试没有意义
@@ -231,7 +252,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
         r._usedApi = r._usedApi || overrides || getConfig().api;
         return r;
       } catch (error) {
-        if (String(error?.code || '').startsWith('PAID_')) throw error;
+        if (/^(PAID_|COMMANDCODE_)/.test(String(error?.code || ''))) throw error;
         lastError = error;
         if (attempt >= retries || !isRetryableError(error)) break;   // 换下一个候选模型
         const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
@@ -331,7 +352,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     // 典型场景：裁判/判定类调用不需要思考，开着只会多烧一轮 reasoning token。
     try {
       const req = resolveThinkingRequest(api, ctx);
-      const built = buildThinkingParams({ effort: req.effort, dialect: req.dialect, budget: req.budget });
+      const built = buildThinkingParams(req);
       if (built.applied) {
         body = { ...body, ...built.params };
         // 思考模式与 temperature 在部分厂商互斥（OpenAI o 系、DeepSeek 思考）：
@@ -378,28 +399,45 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     const guard = productionPaidCallGuard();
     let hold = null, sent = false;
     try {
+      // Session diagnostics belong in local archives, not model input or the
+      // input-token estimate. Tool result names remain semantic wire fields.
+      if (Array.isArray(body?.messages)) body = { ...body, messages: body.messages.map(message => {
+        if (!message || typeof message !== 'object' || Array.isArray(message)) return message;
+        const { raw, inlineParsed, rescued, ...wireMessage } = message;
+        return wireMessage;
+      }) };
       if (guard) {
         hold = guard.prepare({ api, body, purpose: skillContext?.proactive ? 'proactive' : purpose,
           direct: skillContext?.directRequest !== false, platformCredential: resolveApiKey(getConfig()) });
         body = hold.body;
         if (controller.signal.aborted) throw controller.signal.reason ?? Error('aborted');
-        guard.dispatch(hold);
       }
+      // Select the wire protocol only from the final, guard-authorized endpoint.
+      // In particular, a BYOK endpoint must never inherit the platform transport.
+      const commandCode = String(api.baseUrl).replace(/\/+$/, '') === 'https://api.commandcode.ai/alpha';
+      const request = commandCode
+        ? buildCommandCodeRequest({ api: { ...api, baseUrl: 'https://api.commandcode.ai/alpha', transport: 'commandcode-generate' }, body })
+        : { url: joinUrl(api.baseUrl, '/chat/completions'), headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) }, body };
+      if (controller.signal.aborted) throw controller.signal.reason ?? Error('aborted');
+      if (guard) guard.dispatch(hold);
       sent = true;
-      const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
+      const res = await fetch(request.url, {
         method: 'POST',
         redirect: 'error',
-        headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
-        body: JSON.stringify(body),
+        headers: request.headers,
+        body: JSON.stringify(request.body),
         signal: controller.signal
       });
-      const text = await res.text();
+      const rawText = commandCode ? await readCommandCodeResponse(res) : await res.text();
+      // Normalize real supplier usage before settlement; plugins cannot replace it
+      // afterwards with a fabricated zero or hide a separate paid HTTP attempt.
+      const text = commandCode && res.ok ? normalizeCommandCodeResponse(rawText, { model: api.model, responseModels: hold?.responseModels || [], status: res.status }) : rawText;
       if (guard) {
         try { guard.complete(hold, { text, status: res.status }); }
         catch (cause) { throw Object.assign(Error('费用入账未完成，已暂停进一步付费调用'), { code: 'PAID_LEDGER_UNAVAILABLE', cause }); }
         capturePaidAuthority(hold.key);
       }
-      return { ok: res.ok, status: res.status, text, contentType: res.headers.get('content-type') || '' };
+      return { ok: res.ok, status: res.status, text, commandCode, contentType: res.headers.get('content-type') || '' };
     } catch (e) {
       if (hold) {
         try { if (sent) guard.unknown(hold, 'network_error'); else guard.release(hold); }
@@ -420,7 +458,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     res = await post(body);
   } catch (error) {
     clearTimeout(timer);
-    if (String(error?.code || '').startsWith('PAID_')) throw error;
+    if (/^(PAID_|COMMANDCODE_)/.test(String(error?.code || ''))) throw error;
     // 网络/超时失败也要回报账号池（只报 HTTP 失败的话，死端点永远不冷却，调度反复踩坑）
     if (poolAccountId) {
       reportPoolFeedback({ accountId: poolAccountId, ok: false, status: 0, error: String(error?.cause?.message ?? error?.message ?? error).slice(0, 300) });
@@ -452,7 +490,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
         res = await post(retry.body);
       } catch (error) {
         clearTimeout(timer);
-        if (String(error?.code || '').startsWith('PAID_')) throw error;
+        if (/^(PAID_|COMMANDCODE_)/.test(String(error?.code || ''))) throw error;
         // 降级重试的网络失败同样回报账号池
         if (poolAccountId) {
           reportPoolFeedback({ accountId: poolAccountId, ok: false, status: 0, error: String(error?.cause?.message ?? error?.message ?? error).slice(0, 300) });
@@ -470,7 +508,12 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     if (poolAccountId) {
       reportPoolFeedback({ accountId: poolAccountId, ok: false, status: res.status, error: res.text.slice(0, 300) });
     }
-    throw new Error(`模型 API HTTP ${res.status}：${res.text.slice(0, 500)}`);
+    const detail = api.apiKey ? res.text.split(api.apiKey).join('[redacted]') : res.text;
+    const failure = new Error(`模型 API HTTP ${res.status}：${detail.slice(0, 500)}`);
+    // Native subscription endpoints must not turn a denied model, exhausted
+    // quota, or unknown protocol result into a switch to another paid account.
+    if (res.commandCode) failure.code = `COMMANDCODE_HTTP_${res.status}`;
+    throw failure;
   }
 
   // ── "返回了无法解析的 JSON" 根因治理 ──
@@ -617,7 +660,9 @@ async function withoutRejectedParams(body, errorText, ctx, status = 400) {
 /** 获取模型列表（GET /models）。返回 [{ id }]；失败抛错。 */
 export async function listModels() {
   const cfg = effectiveApi();
-  const res = await fetch(joinUrl(cfg.baseUrl, '/models'), {
+  const baseUrl = String(cfg.baseUrl).replace(/\/+$/, '') === 'https://api.commandcode.ai/alpha'
+    ? 'https://api.commandcode.ai/provider/v1' : cfg.baseUrl;
+  const res = await fetch(joinUrl(baseUrl, '/models'), {
     headers: authHeaders(cfg.apiKey, cfg.baseUrl),
     signal: AbortSignal.timeout(15000)
   });
