@@ -36,7 +36,7 @@ test('workspace shell has unique landmarks and keeps account actions outside bus
     assert.equal(d.querySelector('main').id,'main');assert.equal(d.querySelector('.skip-link').getAttribute('href'),'#main');assert.equal(d.getElementById('main').getAttribute('tabindex'),'-1');
     assert.equal(d.getElementById('feedback').getAttribute('role'),'status');assert.equal(d.getElementById('feedback').getAttribute('aria-live'),'polite');
     for(const id of ['context-navigation','area-switch','breadcrumb']){assert.equal(d.getElementById(id).tagName,'NAV');assert.ok(d.getElementById(id).getAttribute('aria-label'));}
-    assert.deepEqual([...d.querySelectorAll('#context-navigation a')].map(a=>a.getAttribute('href')),['#workbench','#cost-overview','#keys']);
+    assert.deepEqual([...d.querySelectorAll('#context-navigation a')].map(a=>a.getAttribute('href')),['#workbench','/my-bots.html','#cost-overview','#keys']);
     assert.equal(d.querySelector('#area-switch a[href="#admin/overview"]').hidden,true);
     for(const target of ['#account','#help']){assert.ok(d.querySelector('#account-menu a[href="'+target+'"]'));assert.equal(d.querySelector('.sidebar a[href="'+target+'"]'),null);}
     for(const action of ['theme','logout'])assert.ok(d.querySelector('#account-menu button[data-action="'+action+'"]'));

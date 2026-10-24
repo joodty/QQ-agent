@@ -22,7 +22,7 @@ export function inspectPlatformFile(name, bytes, terms = []) {
     if (index >= 0) add('local-private-identifier', at(index));
   }
   for (const match of text.matchAll(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g)) add('private-key', at(match.index));
-  for (const match of text.matchAll(/\b(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{30,}|sk-(?:proj-)?[A-Za-z0-9_-]{24,})\b/g)) {
+  for (const match of text.matchAll(/\b(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{30,}|sk-(?:proj-)?[A-Za-z0-9_-]{24,}|user_[A-Za-z0-9]{70,})\b/g)) {
     if (!dummy(match[0])) add('provider-credential', at(match.index));
   }
   for (const match of text.matchAll(/(?:api[_-]?key|access[_-]?token|machineToken|consoleToken|password|passwd|secret)["']?\s*[:=]\s*(["'])([A-Za-z0-9_./+=-]{16,})\1/gi)) {

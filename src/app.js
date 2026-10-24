@@ -34,6 +34,8 @@ import {createPlatformMessages} from './platform-messages.js';
 import { createSpeechService } from './speech-service.js';
 import { createSpeechRoutes } from './speech-routes.js';
 import { createSpeechUsage } from './speech-usage.js';
+import {createBotRuntimeControls} from './bot-runtime-controls.js';
+import {createHostedPlatform,readHostedClientConfig} from './hosted-platform.js';
 import { TENCENT_SPEECH_SAMPLE_ORIGINS } from './speech-voices.js';
 import {catalogueAsset,etagMatches,matchingAssetVersion,publicAssetHeaders,versionWorkspaceHtml} from './http-public-assets.js';
 import * as instanceLockModule from './instance-lock.js';
@@ -92,8 +94,12 @@ function compareSemver(a, b) {
    防止监听器链式递归（见 createApp 内的递归护栏注释）。 */
 const appLogFns = new WeakSet();
 
-export function createApp({ log = console.log, speechCredentials = undefined } = {}) {
+export function createApp({ log = console.log, speechCredentials = undefined, hostedOptions = undefined } = {}) {
   const cfg = getConfig();
+  const hostedBotId=process.env.QQ_AGENT_HOSTED_BOT_ID||'';
+  const hostedExpectedQQ=process.env.QQ_AGENT_HOSTED_EXPECTED_QQ||'';
+  const hostedWorker=Boolean(hostedBotId);
+  if(hostedWorker&&(!/^hosted-[a-f0-9]{32}$/.test(hostedBotId)||!(/^[1-9]\d{4,15}$/.test(hostedExpectedQQ))))throw new Error('托管实例身份环境不完整');
   const platformOrigin = cfg.platform?.publicOrigin || process.env.QQ_AGENT_PUBLIC_ORIGIN || '';
   const platformEnabled = cfg.platform?.enabled === true || Boolean(platformOrigin);
   if (platformEnabled && !platformOrigin) throw new Error('账号工作台需要明确的公开访问地址');
@@ -653,6 +659,11 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   const memory = archives ? scopeArchiveMemory(new MemoryStore(), store) : new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
   const onebot = new OneBotClient({
+    expectedSelfId: hostedWorker?hostedExpectedQQ:'',
+    beforeSend:hostedWorker?({params})=>{
+      const current=getConfig(),kind=params.group_id!=null?'group':'private',id=String(params.group_id??params.user_id??params.target_id??'');
+      return current.productionBudget?.platformSuspended!==true&&/^[1-9]\d*$/.test(id)&&resourceAllowed(kind,id,current);
+    }:null,
     wsUrl: cfg.snowluma?.wsUrl,
     httpUrl: cfg.snowluma?.httpUrl,
     accessToken: cfg.snowluma?.accessToken,
@@ -671,7 +682,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   const sender =   new SendQueue({
     onebot, store,
     manualCapability:manualMessageCapability,
-    canSend: chatKey => !departedGroups.has(chatKey),
+    canSend: chatKey => !departedGroups.has(chatKey)&&(!hostedWorker||hostedIdentityMatches()&&resourceAllowed(...chatKey.split(':'),getConfig())),
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
     log
   });
@@ -713,11 +724,19 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     file: path.join(DATA_DIR, 'platform-business.sqlite'), keyFile: path.join(DATA_DIR, 'platform-business.key'),
     archives, store, orchestrator, auth: platformAuth, config: getConfig
   }) : null;
-  const speechService = platformEnabled ? createSpeechService({
-    file: path.join(DATA_DIR, 'speech.sqlite'), auth: platformAuth, store, orchestrator, config: getConfig,
+  const internalSpeechPrincipal=Object.freeze({id:'hosted-owner-service',role:'admin'});
+  const internalSpeechAuth={verifyPrincipal(principal){if(principal!==internalSpeechPrincipal)throw Object.assign(Error('未授权'),{statusCode:401});return principal;},
+    canAccess:(principal,key)=>principal===internalSpeechPrincipal&&/^(group|private):[1-9]\d*$/.test(key),
+    listScopes:()=>listedResourceKeys()};
+  const speechService = platformEnabled||hostedWorker ? createSpeechService({
+    file: path.join(DATA_DIR, 'speech.sqlite'), auth: platformAuth||internalSpeechAuth, store, orchestrator, config: getConfig,
     ...(speechCredentials === undefined ? {} : { credentials: speechCredentials })
   }) : null;
   orchestrator.speech = speechService;
+  const botRuntimeControls=createBotRuntimeControls({config:getConfig,updateConfig,store,orchestrator,onebot,speechService,speechPrincipal:internalSpeechPrincipal,hosted:hostedWorker});
+  const hostedPlatform=platformEnabled?createHostedPlatform({auth:platformAuth,dataDir:DATA_DIR,config:getConfig,onebot,primaryControls:botRuntimeControls,speechService,
+    ...(hostedOptions??readHostedClientConfig(process.env.QQ_AGENT_HOSTED_CLIENT_CONFIG))}):null;
+  if(cfg.platform?.apiAccessPending===true)orchestrator.setPaused(true,'provider-access-pending');
   let platformMessages=null;
   if(platformEnabled){
     try{platformMessages=createPlatformMessages({file:path.join(DATA_DIR,'manual-messages.sqlite'),auth:platformAuth,store,onebot,speechService,config:getConfig,canReach:chatKey=>!departedGroups.has(chatKey),sendText:(chatKey,text,options)=>sender.sendManualText(chatKey,text,{...options,capability:manualMessageCapability}),sendSpeech:(chatKey,options)=>sender.sendManualSpeech(chatKey,{...options,capability:manualMessageCapability})});}
@@ -732,12 +751,15 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   }, 30000) : null;
   groupPermissionTimer?.unref?.();
   function resourceAllowed(kind, id, current) {
+    if(hostedWorker&&(!hostedIdentityMatches()||!Number.isSafeInteger(current.hostedLeaseUntil)||current.hostedLeaseUntil<=Date.now()))return false;
+    if(current.botControls&&(current.botControls.enabled===false||kind==='group'&&current.botControls.groupReplies===false||kind==='private'&&current.botControls.privateReplies===false))return false;
     if (kind === 'group' && departedGroups.has(`group:${id}`)) return false;
     const denied = current.deny?.[kind] ?? current.deny?.[`${kind}s`] ?? [];
     if (denied.map(String).includes(String(id))) return false;
     return allowed(kind, id, current) || Boolean(platformBusiness?.runtimeAllowed(`${kind}:${id}`));
   }
   stickerIngressReady = true;
+  function hostedIdentityMatches(){return !hostedWorker||onebot.connected===true&&String(onebot.selfId||'')===hostedExpectedQQ;}
 
   // 远程价格表固定为官网公开地址；不从用户配置读取，避免被页面/配置篡改。
   initPriceFeed(FIXED_PRICE_FEED_URL);
@@ -748,6 +770,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
 
   // OneBot 连接状态推送
   onebot.onStatus((status) => emit('onebot-status', status));
+  if(hostedWorker)onebot.onStatus(()=>{if(!hostedIdentityMatches()){orchestrator.setPaused(true,'hosted-identity-unverified');for(const key of store.listChats())orchestrator.archiveChanged(key);}else if(getConfig().hostedLeaseUntil>Date.now())orchestrator.setPaused(getConfig().botControls?.enabled===false,'owner-preferences');});
 
   // ── 从 SnowLuma 配置自动同步 OneBot 令牌 ──
   // SnowLuma 给每个登录过的账号生成独立随机 token（config/onebot_<uin>.json），
@@ -977,7 +1000,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     const selfIdNow = onebot.selfId || '';
     const atMe = atMarks.length
       ? atMarks.some((m) => m.qq !== 'all' && selfIdNow && String(m.qq) === String(selfIdNow))
-      : isAtMe(text, {
+      : cfgNow.botControls?.mentionOnly===true?Boolean(selfIdNow&&text.includes(`[CQ:at,qq=${selfIdNow}]`)):isAtMe(text, {
         selfId: selfIdNow,
         selfNickname: onebot.selfNickname,
         botName: getConfig().persona?.botName || ''
@@ -1134,6 +1157,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
 
   async function handleOneBotEvent(event) {
     if (!event || typeof event !== 'object') return;
+    if(hostedWorker&&!hostedIdentityMatches())return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
       if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
@@ -1438,6 +1462,32 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
     if(catalogueAsset(req,res,url))return;
+    if(pathname.startsWith('/api/hosted/')){
+      if(!hostedWorker)return json(res,404,{error:'接口不存在'});
+      if(!getConfig().server?.token||req.headers['x-console-token']!==getConfig().server.token)return json(res,401,{error:'未授权'});
+      if(!originAllowed(req))return json(res,403,{error:'请求来源不被信任'});
+      if(pathname==='/api/hosted/identity'&&req.method==='GET')return json(res,200,botRuntimeControls.identity());
+      let applyingHostedSettings=false;
+      try{
+        if(!hostedIdentityMatches())throw Object.assign(Error('QQ实例身份尚未核实'),{statusCode:409});
+        const body=await readBody(req),lease=body?.leaseUntil;
+        if(body.expectedQQ!==hostedExpectedQQ||!Number.isSafeInteger(lease)||lease<=Date.now()||lease>Date.now()+120000)throw Object.assign(Error('实例授权无效'),{statusCode:400});
+        if(req.method==='PUT'&&pathname==='/api/hosted/lease'){
+          if(Object.keys(body).some(k=>!['leaseUntil','expectedQQ'].includes(k))||!getConfig().hostedApplied)throw Object.assign(Error('设置尚未应用'),{statusCode:409});
+          updateConfig({hostedLeaseUntil:Math.max(lease,getConfig().hostedLeaseUntil||0)});return json(res,200,{ok:true});
+        }
+        if(req.method==='PUT'&&pathname==='/api/hosted/settings'){
+          if(Object.keys(body).some(k=>!['version','defaultsVersion','effective','leaseUntil','expectedQQ'].includes(k))||!Number.isSafeInteger(body.version)||body.version<0||!Number.isSafeInteger(body.defaultsVersion)||body.defaultsVersion<1)throw Object.assign(Error('设置版本无效'),{statusCode:400});
+          const old=getConfig().hostedApplied;
+          if(old&&(body.version<old.version||body.defaultsVersion<old.defaultsVersion||body.version===old.version&&body.defaultsVersion===old.defaultsVersion&&JSON.stringify(body.effective)!==JSON.stringify(getConfig().botControls)))throw Object.assign(Error('设置版本已过期'),{statusCode:409});
+          if(!old||body.version!==old.version||body.defaultsVersion!==old.defaultsVersion){applyingHostedSettings=true;await botRuntimeControls.apply(body.effective,{expectedQQ:hostedExpectedQQ});}
+          updateConfig({hostedLeaseUntil:lease,hostedApplied:{version:body.version,defaultsVersion:body.defaultsVersion}});
+          orchestrator.setPaused(getConfig().botControls?.enabled===false||getConfig().platform?.apiAccessPending===true,'owner-preferences');
+          return json(res,200,{ok:true});
+        }
+        return json(res,404,{error:'接口不存在'});
+      }catch(error){if(applyingHostedSettings){updateConfig({hostedLeaseUntil:0});orchestrator.setPaused(true,'hosted-settings-unavailable');}return json(res,error.statusCode||503,{error:'实例设置尚未生效'});}
+    }
 
     // Cloud accounts have their own Cookie/RBAC boundary. A browser-supplied
     // console header is replaced by the gateway; the engine requires its exact
@@ -1455,6 +1505,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
       if (!principal) return json(res, 401, { error: '请先登录' });
       try {
         const fresh = platformAuth.verifyPrincipal(principal);
+        if(await hostedPlatform.handle(req,res,url,fresh,{readBody,json}))return;
         for (const route of apiRoutes) {
           if (route.method !== req.method || typeof route.pattern !== 'string' || route.pattern !== pathname) continue;
           return await route.handler({ req, res, url, pathname, method: req.method, json, principal: fresh });
@@ -1622,7 +1673,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   async function listenOn(port) {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, '127.0.0.1', () => {
+      server.listen(port, hostedWorker&&process.env.QQ_AGENT_HOSTED_BIND_HOST==='0.0.0.0'?'0.0.0.0':'127.0.0.1', () => {
         server.off('error', reject);
         resolve(port); // 必须把实际端口传回去，Electron 壳要用它加载页面
       });
@@ -1749,9 +1800,8 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     // 连着但仍没有 selfInfo 就强制补一次并广播状态（长期运行的兜底，幂等）。
     setTimeout(() => {
       if (!onebot.connected || onebot.selfInfo) return;
-      onebot.call('get_login_info').then((info) => {
+      onebot.refreshSelfInfo().then((info) => {
         if (info) {
-          onebot.selfInfo = info;
           emit('onebot-status', { connected: true, everConnected: true, error: '' });
           log('[onebot] 账号信息延迟恢复成功');
         }
@@ -1796,6 +1846,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
   }
 
   async function stop() {
+    await hostedPlatform?.close();
     const manualMessagesClosing=platformMessages?.close();
     stickerIngressReady = false;
     await stickers.close();
@@ -1838,7 +1889,7 @@ export function createApp({ log = console.log, speechCredentials = undefined } =
     releaseInstanceLock();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, speechService, chatIdentities, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, platformAuth, platformBusiness, speechService, hostedPlatform, chatIdentities, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, launchPortableQQ, stopPortableQQ, qqPortableStatus, reloadSkills };
 }
 
 /**

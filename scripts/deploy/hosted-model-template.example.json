@@ -1,0 +1,37 @@
+{
+  "api": {
+    "baseUrl": "https://model-provider.example.invalid/v1",
+    "apiKey": "",
+    "model": "replace-with-approved-model",
+    "fallbackModels": []
+  },
+  "providers": [],
+  "dshProviderKeys": {},
+  "productionBudget": {
+    "enabled": true,
+    "endpoint": "https://model-provider.example.invalid/v1",
+    "model": "replace-with-approved-model",
+    "prices": {
+      "inputCnyPerMillion": null,
+      "cacheHitCnyPerMillion": null,
+      "outputCnyPerMillion": null,
+      "reasoningIncluded": true
+    },
+    "defaultDailyLimitCny": 1.5,
+    "totalDailyLimitCny": 3,
+    "outputCap": 1024,
+    "imageTokensPerImage": 1024,
+    "overrides": {},
+    "initialSpent": {},
+    "funding": {}
+  },
+  "speech": {
+    "credentialFile": "/etc/qq-agent-hosted/speech-credential.json",
+    "timeoutMs": 10000
+  },
+  "hostedFundingLimits": {
+    "speechDailyLimitCny": 0.3,
+    "speechPlatformDailyLimitCny": 0.3,
+    "speechCooldownMs": 10000
+  }
+}

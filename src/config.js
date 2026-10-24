@@ -661,6 +661,7 @@ export function personaForChat(chatKey) {
   const [kind, id] = String(chatKey || '').split(':');
   if (!id || !['group', 'private'].includes(kind)) return base;
   const archived = archivePersonaResolver?.(chatKey);
+  if(getConfig().botControls?.personaText)return {...base,...(archived||{}),roleText:getConfig().botControls.personaText,systemPromptOverride:''};
   if (archived) return { ...base, ...archived };
   // 统一人设模式：一律用全局，不看 personaByChat
   if (getConfig().personaUnified !== false) return base;
@@ -695,6 +696,13 @@ export function personaForChat(chatKey) {
  */
 export function storeConfigForChat(chatKey,{ignoreReplyOverride=false}={}) {
   const store = getConfig().store || {};
+  const controls=getConfig().botControls;
+  if(controls){
+    const privateChat=String(chatKey).startsWith('private:');
+    return {...store,contextTier:controls.mentionOnly?1:controls.replyPercent===100?4:3,
+      randomPercent:controls.replyPercent,replyPercent:privateChat?100:controls.replyPercent,
+      mentionOnly:controls.mentionOnly===true,historyCount:controls.contextMessages,allCount:controls.contextMessages};
+  }
   const row=ignoreReplyOverride?null:store.replyByChat?.[chatKey];
   const replyPercent=Number.isInteger(row?.replyPercent)&&row.replyPercent>=0&&row.replyPercent<=100?row.replyPercent:null;
   // ── 指令禁言：该群被禁言且未到期 → 强制 1 档（仅艾特）──

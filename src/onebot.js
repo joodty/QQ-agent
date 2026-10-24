@@ -56,6 +56,7 @@ const SEND_TIMEOUT_MS = 90000;    // 发送类：协议端要接收 body + 解�
 // image/video/record 段，那才是需要长窗口的。
 // `send_(group|private)` 同时覆盖了 `send_group_msg` 与 `send_group_forward_msg`。
 const SLOW_ACTION = /^(send_(group|private)|upload_|_send)/i;
+const IDENTITY_PROTECTED_ACTION = /^(?:send_|_send|upload_|friend_poke$|group_poke$)/i;
 
 /**
  * 把 fetch 的 `cause` 链挖成人话。
@@ -82,7 +83,12 @@ function describeCause(error, depth = 0) {
 }
 
 export class OneBotClient {
-  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
+  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent, expectedSelfId = '', beforeSend = null }) {
+    if (expectedSelfId !== '' && (typeof expectedSelfId !== 'string' || !/^[1-9]\d{4,14}$/.test(expectedSelfId)
+        || !Number.isSafeInteger(Number(expectedSelfId)))) throw new TypeError('Invalid expected OneBot identity');
+    this.expectedSelfId = expectedSelfId;
+    if (beforeSend !== null && typeof beforeSend !== 'function') throw new TypeError('beforeSend must be a synchronous function');
+    this.beforeSend = beforeSend;
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
     this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     this.accessToken = String(accessToken || '');
@@ -103,6 +109,45 @@ export class OneBotClient {
   #connectGeneration = 0;  // 连接循环代际号：新循环启动即作废旧循环（防并发僵尸循环）
   #reconnectTimer = null;  // 待执行的重连定时器（close/reconnect 时要清，防泄漏）
   #selfInfoTimer = null;   // get_login_info 延迟补拉定时器
+  #identityEpoch = 0;
+
+  #invalidateIdentity(notify = false) {
+    this.#identityEpoch++;
+    this.selfInfo = null;
+    if (notify) this.#setStatus(this.connected);
+  }
+
+  #identityError(message = 'QQ实例身份尚未核实') {
+    return Object.assign(new Error(message), { code: 'ONEBOT_IDENTITY_UNVERIFIED' });
+  }
+
+  // Queries may finish after a reconnect, close or a mismatching event. None of
+  // those old responses may restore the identity of a newer connection.
+  async #loadSelfInfo(socket, generation, epoch) {
+    const value = await this.call('get_login_info');
+    if (this.socket !== socket || generation !== this.#connectGeneration || epoch !== this.#identityEpoch
+        || socket?.readyState !== WebSocket.OPEN) throw this.#identityError('QQ连接身份已变化');
+    if (this.expectedSelfId && String(value?.user_id || '') !== this.expectedSelfId) {
+      this.#invalidateIdentity(true);
+      throw this.#identityError('QQ实例身份与申请不符');
+    }
+    this.selfInfo = value;
+    this.#setStatus(true);
+  }
+
+  async #assertHostedSendIdentity() {
+    const socket = this.socket, generation = this.#connectGeneration, epoch = this.#identityEpoch;
+    if (!this.connected || socket?.readyState !== WebSocket.OPEN) throw this.#identityError();
+    try {
+      // No identity cache for sends: the HTTP protocol endpoint can switch QQ
+      // while its WebSocket remains connected. get_login_info is not recursive.
+      await this.#loadSelfInfo(socket, generation, epoch);
+    } catch (error) {
+      if (this.socket === socket && generation === this.#connectGeneration && epoch === this.#identityEpoch) this.#invalidateIdentity(true);
+      throw error?.code === 'ONEBOT_IDENTITY_UNVERIFIED' ? error : this.#identityError();
+    }
+    return { socket, generation, epoch };
+  }
 
   onStatus(fn) {
     this.statusListeners.add(fn);
@@ -122,12 +167,22 @@ export class OneBotClient {
     this.#connectLoop();
   }
 
+  // The application's late startup retry must use the same identity epoch as
+  // the built-in retry, rather than assigning a raw HTTP result to selfInfo.
+  async refreshSelfInfo() {
+    if (this.expectedSelfId) await this.#assertHostedSendIdentity();
+    else await this.#loadSelfInfo(this.socket, this.#connectGeneration, this.#identityEpoch);
+    return this.selfInfo;
+  }
+
   /** 连接配置可能变了（比如从 SnowLuma 配置同步到了新令牌），重连一次。 */
   async reconnect() {
     // 关键：先作废旧 socket，再启新连接。否则旧 socket 的 close 事件稍后到达时
     // 会误以为需要再次重连，造成两个 WebSocket 同时连着 SnowLuma，所有事件收到两份。
     const old = this.socket;
     this.socket = null;
+    this.#invalidateIdentity();
+    this.#setStatus(false);
     this.#closedByUs = false;
     // ⚠️ 退避必须清零（2026-09-19）：reconnect 是"配置变了主动换连接"，不是失败。
     // 之前不清零时，主动换 token 后的第一次连接仍背着旧循环涨到 30 秒的退避，
@@ -190,6 +245,8 @@ export class OneBotClient {
     // 创建成功即接管"当前 socket"：更早的 socket（若有）全部作废。
     const stale = this.socket;
     this.socket = socket;
+    this.#invalidateIdentity();
+    this.#setStatus(false);
     if (stale && stale !== socket) {
       try { stale.removeAllListeners(); } catch { /* ignore */ }
       try { stale.close(); } catch { /* ignore */ }
@@ -203,9 +260,12 @@ export class OneBotClient {
       this.lastConnectError = '';
       this.#failedAttempts = 0;   // 连上了，退避计数清零
       this.#setStatus(true);
+      const epoch = this.#identityEpoch;
       try {
-        this.selfInfo = await this.call('get_login_info');
+        await this.#loadSelfInfo(socket, generation, epoch);
       } catch (error) {
+        if (!isCurrent(socket) || generation !== this.#connectGeneration || epoch !== this.#identityEpoch) return;
+        this.#invalidateIdentity(true);
         console.error('[onebot] 获取登录信息失败:', error?.message ?? error);
         // get_login_info 失败不代表连接不可用（可能是 SnowLuma 还在启动中）。
         // 挂一个延迟补拉：连着但 selfInfo 一直空 → /api/status 的 self 恒为 null，
@@ -218,10 +278,15 @@ export class OneBotClient {
       let event = null;
       try { event = JSON.parse(String(data)); } catch { return; }
       if (!event || typeof event !== 'object') return;
+      if (this.expectedSelfId) {
+        if (String(event.self_id ?? '') !== this.expectedSelfId) { this.#invalidateIdentity(true); return; }
+        if (this.selfId !== this.expectedSelfId) return;
+      }
       try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
+      this.#invalidateIdentity();
       this.#setStatus(false);
       if (!this.#closedByUs) {
         // 指数退避：长断线时 3 秒一次的重试风暴既刷屏又占资源；
@@ -234,6 +299,7 @@ export class OneBotClient {
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
       this.lastConnectError = String(error?.message ?? error);
+      this.#invalidateIdentity();
       // ⚠️ 广播状态不能只看 everConnected（2026-09-19）：曾经"连上过一次就不再广播
       // 失败状态"，导致长连接断开后的持续 401 在 UI 上毫无感知（状态一直是"已连接"），
       // 令牌轮换的恢复钩子也收不到信号。现在每次 error 都广播，由监听方自行去重。
@@ -247,9 +313,9 @@ export class OneBotClient {
     const timer = setTimeout(async () => {
       this.#selfInfoTimer = null;
       if (!this.connected || this.selfInfo) return;
+      const socket = this.socket, generation = this.#connectGeneration, epoch = this.#identityEpoch;
       try {
-        this.selfInfo = await this.call('get_login_info');
-        if (this.selfInfo) this.#setStatus(true);   // 触发一次状态广播，UI 拿到账号信息
+        await this.#loadSelfInfo(socket, generation, epoch);
       } catch { /* 还没就绪就等下一轮事件驱动；下一条消息到达时 open 流程不会再补 —— 靠这个定时器最多再试一次 */ }
     }, SELF_INFO_RETRY_MS);
     this.#selfInfoTimer = timer;
@@ -257,6 +323,7 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    this.#invalidateIdentity();
     if (this.#reconnectTimer) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
     if (this.#selfInfoTimer) { clearTimeout(this.#selfInfoTimer); this.#selfInfoTimer = null; }
     const old = this.socket;
@@ -267,6 +334,16 @@ export class OneBotClient {
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action, params = {}, timeoutMs = null) {
+    if (this.expectedSelfId && IDENTITY_PROTECTED_ACTION.test(String(action))) {
+      const identity = await this.#assertHostedSendIdentity();
+      if (this.socket !== identity.socket || this.#connectGeneration !== identity.generation || this.#identityEpoch !== identity.epoch
+          || !this.connected || this.selfId !== this.expectedSelfId) throw this.#identityError('QQ连接身份已变化');
+    }
+    // The fresh HTTP identity lookup above is asynchronous. Recheck leases and
+    // resource authority after it, immediately before the actual side effect.
+    if (IDENTITY_PROTECTED_ACTION.test(String(action)) && this.beforeSend && this.beforeSend({ action, params }) !== true) {
+      throw Object.assign(new Error('QQ发送授权已变化'), { code: 'ONEBOT_SEND_REVOKED' });
+    }
     // ── 超时按 action 分档（这里修过一个真实故障）──────────────────────────
     // 原来一律 15 秒。查询类够用，但**发送类不够**：图片/视频以 base64 或大 body
     // 发出去时，协议端要走完「接收 body → 解码 → 上传腾讯服务器 → 返回」，

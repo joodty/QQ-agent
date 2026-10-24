@@ -61,7 +61,7 @@
     "test:sticker": "node test/sticker-collect-test.mjs",
     "test:msgid": "node test/message-id-test.mjs",
     "test:coverage": "node test/coverage-offline.mjs && node test/coverage-http.mjs && node test/coverage-e2e.mjs && node test/coverage-ui.mjs && node test/coverage-wiring.mjs",
-    "test:all": "npm test && npm run test:coverage && npm run test:platform && npm run test:archives && npm run test:paid-guard && npm run test:gateway && npm run test:workspace && npm run test:extensions && npm run test:speech && npm run test:interactions && npm run test:speech-usage && npm run test:chat-controls && npm run test:authorization && npm run test:messages",
+    "test:all": "npm test && npm run test:coverage && npm run test:platform && npm run test:archives && npm run test:paid-guard && npm run test:gateway && npm run test:workspace && npm run test:extensions && npm run test:speech && npm run test:interactions && npm run test:speech-usage && npm run test:chat-controls && npm run test:authorization && npm run test:messages && npm run test:hosted",
     "test:workspace": "node --test test/platform-auth-test.mjs test/platform-auth-import-test.mjs test/platform-business-test.mjs test/platform-business-import-test.mjs test/platform-business-cli-test.mjs test/platform-legacy-business-export-test.mjs test/platform-app-integration-test.mjs test/platform-workspace-ui-test.mjs test/sender-availability-test.mjs test/workspace-loading-ui-test.mjs test/platform-lean-overview-test.mjs test/store-list-metadata-test.mjs test/workspace-hierarchy-ui-test.mjs test/workspace-shell-test.mjs test/workspace-chat-identities-test.mjs test/chat-identities-store-test.mjs test/chat-identities-app-test.mjs test/workspace-persistent-identities-ui-test.mjs test/platform-management-costs-test.mjs test/platform-management-model-test.mjs test/platform-management-app-test.mjs test/workspace-write-race-ui-test.mjs",
     "test:chat-controls": "node --test test/reply-settings-test.mjs test/speech-private-management-test.mjs test/workspace-reply-and-speech-controls-ui-test.mjs",
     "test:authorization": "node --test test/platform-unfunded-budget-app-test.mjs test/workspace-authorization-discovery-ui-test.mjs test/paid-call-guard-test.mjs",
@@ -94,7 +94,8 @@
     "test:wakesem": "node test/wake-semantics-test.mjs",
     "test:platform": "node --test test/conversation-context-test.mjs test/conversation-budget-test.mjs test/platform-publication-test.mjs",
     "check:public": "node scripts/check-platform-publication.mjs",
-    "test:archives": "node --test test/conversation-archives-test.mjs test/legacy-archive-export-test.mjs test/legacy-import-cli-test.mjs test/legacy-archive-runtime-test.mjs"
+    "test:archives": "node --test test/conversation-archives-test.mjs test/legacy-archive-export-test.mjs test/legacy-import-cli-test.mjs test/legacy-archive-runtime-test.mjs",
+    "test:hosted": "node --test test/bot-preferences-test.mjs test/hosted-bots-test.mjs test/my-bots-ui-test.mjs test/instance-total-budget-test.mjs test/hosted-app-integration-test.mjs test/onebot-hosted-identity-test.mjs test/provider-code-review-findings-test.mjs test/platform-provider-suspension-test.mjs"
   },
   "dependencies": {
     "js-yaml": "^5.4.1",

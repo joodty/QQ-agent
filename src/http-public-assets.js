@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC as catalogue,TENCENT_SPEECH_VOICE_CATALOGUE_JSON} from './speech-voices.js';
-const PUBLIC_FILES=new Set(['/login.html','/workspace.html','/platform.js','/platform.css','/help.html','/favicon.ico']);
+const PUBLIC_FILES=new Set(['/login.html','/workspace.html','/platform.js','/platform.css','/help.html','/favicon.ico','/my-bots.html','/my-bots.js','/my-bots.css']);
 const CATALOGUE_PATH=/^\/assets\/speech-voices\.[a-f0-9]{64}\.json$/;
 export const isPublicAssetPath=pathname=>PUBLIC_FILES.has(pathname)||CATALOGUE_PATH.test(pathname);
 export const contentHash=data=>createHash('sha256').update(data).digest('hex');

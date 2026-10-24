@@ -1,5 +1,7 @@
 # 群管理扩展：从这里接手
 
+2026-10-24 新要求：恢复普通账户本人申请、本人扫码的独立 QQ Agent 接入；管理员在本人功能上增加平台默认偏好管理，普通账户可覆盖各项业务默认值。实现与边界见 [本人 QQ 接入](HOSTED_BOTS.md)。旧账号和公共 QQ 工作台继续保留，旧 Bridge／DSH 仍停用。当前发布与外部阻塞以[生产交接](PRODUCTION_HANDOFF.md)最新记录为准。
+
 更新日期：2026-10-23。开发仓库：[joodty/QQ-agent](https://github.com/joodty/QQ-agent/tree/codex/group-management)，分支 `codex/group-management`；上游 [K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)。首次基线为 `fdfd325e148d91845a0aeea3dfdff4cf92fc61a1`，版本 0.4.0。保留上游 MIT 许可和 Kondius 署名。
 
 ## 产品目标与保留成果
@@ -8,7 +10,7 @@
 
 旧项目不是废弃数据：账号、授权、Key 加密、预算、版本化人设、会话档案、SQLite 与测试用例都是迁移依据。新聊天底座不继续复制 DSH 及平台完整 Agent/BYOK 纯文本两套链。详细清单见 [迁移说明](MIGRATION.md)，约定见 [开发经验](DEVELOPMENT_LESSONS.md) 与 [能力契约](CAPABILITY_CONTRACT.md)。
 
-自助托管用户私人 QQ 和部署多个客户端暂不作为新产品主线。这个调整不改变第三方 QQ 接入的适用规则，也不能把一个小型节点承诺为无限量机器人托管平台。
+自助托管私人 QQ 已按 2026-10-24 用户新要求恢复，采用独立实例和容量准入。实例名额与主机内存分开核验，不将小型节点承诺为无限量托管平台。
 
 ## 当前状态
 

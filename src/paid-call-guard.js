@@ -16,7 +16,7 @@ const error = (message, code = 'PAID_CALL_DENIED') => Object.assign(Error(messag
 const isDate = x => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x + 'T00:00:00Z')) && new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) === x;
 const stable = x => Array.isArray(x) ? '[' + x.map(stable).join(',') + ']' : plain(x) ? '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + stable(x[k])).join(',') + '}' : JSON.stringify(x);
 const hash = x => crypto.createHash('sha256').update(stable(x)).digest('hex');
-const fundingFingerprint = (p, key) => hash({ endpoint: p.endpoint, model: p.model, prices: p.prices, funding: p.funding[key], outputCap: p.outputCap, imageTokensPerImage: p.imageTokensPerImage ?? null, responseModels: p.verifiedResponseModels || [] });
+const fundingFingerprint = (p, key) => hash({ endpoint: p.endpoint, model: p.model, prices: p.prices, funding: p.funding[key], outputCap: p.outputCap, totalDailyLimitCny: p.totalDailyLimitCny ?? null, imageTokensPerImage: p.imageTokensPerImage ?? null, responseModels: p.verifiedResponseModels || [] });
 let fundingServices = null;
 export function setPaidCallFundingServices(services) {
   if (services !== null && (typeof services?.resolve !== 'function' || typeof services?.policy !== 'function')) throw error('出资解析服务无效');
@@ -28,9 +28,13 @@ function effectivePolicy(config) {
   return { ...p, overrides: { ...p.overrides, ...(extra.overrides || {}) }, trial: extra.trial || null };
 }
 function sourceFor(config, key) {
+  const controls=config.botControls,controlledKind=String(key).split(':')[0];
+  if(controls&&(controls.enabled===false||controlledKind==='group'&&controls.groupReplies===false||controlledKind==='private'&&controls.privateReplies===false))throw error('机器人或此类聊天的回复已停用');
+  if(process.env.QQ_AGENT_HOSTED_BOT_ID&&(!Number.isSafeInteger(config.hostedLeaseUntil)||config.hostedLeaseUntil<=Date.now()))throw error('托管实例授权已过期，等待平台重新核验');
   const p = effectivePolicy(config), resolved = fundingServices?.resolve(key);
   if (resolved?.blocked) throw error('当前出资已停用、被撤销或尚未配置');
   const source = resolved || (p.funding[key]?.mode === 'platform' && p.funding[key]?.enabled === true ? { id:'platform',version:1,mode:'platform',endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels || [],imageTokensPerImage:p.imageTokensPerImage,scopeAuthorized:false } : null);
+  if(source?.mode!=='byok'&&p.platformSuspended===true)throw error('平台模型服务暂未开放调用，等待管理员恢复');
   const [kind,id] = String(key).split(':'), denied = config.deny?.[kind === 'group' ? 'groups' : 'private'];
   if (!source || !chatKey(key) || Array.isArray(denied) && denied.map(String).includes(id) || !allowed(config,key) && source.scopeAuthorized !== true) throw error('聊天或出资未获明确授权');
   if (!['platform','trial','byok'].includes(source.mode) || typeof source.id !== 'string' || !Number.isSafeInteger(source.version) || source.version < 1 || typeof source.model !== 'string'
@@ -74,7 +78,9 @@ function policy(config) {
     || !Number.isSafeInteger(p.outputCap) || p.outputCap < 1 || p.outputCap > 8192
     || !plain(p.overrides) || !plain(p.funding) || !plain(p.initialSpent)
     || p.verifiedResponseModels !== undefined && (!Array.isArray(p.verifiedResponseModels) || p.verifiedResponseModels.some(x => typeof x !== 'string' || !x || x.length > 200))
-    || p.imageTokensPerImage !== undefined && p.imageTokensPerImage !== 1024) throw error('生产费用保护未就绪或缺少完整人民币报价');
+    || p.imageTokensPerImage !== undefined && p.imageTokensPerImage !== 1024
+    || p.platformSuspended !== undefined && typeof p.platformSuspended!=='boolean'
+    || p.totalDailyLimitCny !== undefined && !money(p.totalDailyLimitCny)) throw error('生产费用保护未就绪或缺少完整人民币报价');
   if (!p.prices.inputCnyPerMillion && !p.prices.outputCnyPerMillion) throw error('不能用缺失的零报价开放付费调用');
   for (const [key, limit] of Object.entries(p.overrides)) if (!chatKey(key) || !money(limit)) throw error('会话预算覆盖配置无效');
   for (const [key, f] of Object.entries(p.funding)) if (!chatKey(key) || !plain(f) || typeof f.mode !== 'string' || typeof f.enabled !== 'boolean') throw error('会话出资策略无效');
@@ -178,7 +184,22 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
   if (!storage || typeof config !== 'function') throw error('费用保护缺少依赖');
   let seedAt = null;
   const budget = createConversationBudget({ storage, file: 'conversation-budget', botId: 'primary', now: () => seedAt ?? now() });
-  let trialBudget=null;
+  let trialBudget=null, totalBudget=null;
+  // Optional per-instance ceiling, shared by every conversation, model retry,
+  // tool round and speech synthesis. All reservations use this same transaction.
+  function total(p) {
+    if(p.totalDailyLimitCny===undefined){if(storage.readText('instance-total-enabled-marker')!==null)throw error('已经启用的机器人总额度不能直接移除','PAID_LEDGER_UNAVAILABLE');return null;}
+    if(!totalBudget){
+      const marker=storage.readText('instance-total-enabled-marker');
+      if(marker===null&&budget.records().length)throw error('已有费用账本不能直接新增未衔接的机器人总额度','PAID_LEDGER_UNAVAILABLE');
+      if(marker!==null){let parsed;try{parsed=JSON.parse(marker);}catch{}if(parsed?.version!==1)throw error('机器人总额度初始化标记损坏','PAID_LEDGER_UNAVAILABLE');}
+      totalBudget=createConversationBudget({storage,file:'instance-total-budget',botId:'instance_total',now});
+      if(marker===null)storage.writeText('instance-total-enabled-marker',JSON.stringify({version:1}),null);
+    }
+    const current=totalBudget.config();
+    if(!current.enabled||current.defaultDailyLimitCny!==p.totalDailyLimitCny)totalBudget.update({configVersion:current.configVersion,enabled:true,defaultDailyLimitCny:p.totalDailyLimitCny});
+    return totalBudget;
+  }
   const serviceTokens = new WeakMap();
   const speechBudget = createConversationBudget({ storage, file:'speech-subsidy-budget', botId:'speech_subsidy', now });
   const speechTotal = createConversationBudget({ storage, file:'speech-platform-budget', botId:'speech_platform', now });
@@ -238,29 +259,34 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
       storage.writeText('initial-spent-marker', JSON.stringify({ version: 1, seedHash }), null);
     }
     sync(p);
+    total(p);
   });
   return {
     status(key) { return storage.transaction(() => { sync(effectivePolicy(config())); return budget.status(key); }); },
     records: filters => budget.records(filters),
     trialStatus(){return storage.transaction(()=>trial(effectivePolicy(config())).status('private:1'));},
+    totalStatus(){return storage.transaction(()=>total(effectivePolicy(config()))?.status('private:1')||null);},
     prepare({ api, body, purpose = 'chat', direct = true, platformCredential, operationId = crypto.randomUUID() }) {
       return storage.transaction(() => {
         const cfg = config(), context = currentConversationContext(), p = authorize(cfg, context); sync(p);
         const credential = p.source.mode === 'byok' ? p.source.apiKey : platformCredential;
         if (endpoint(api.baseUrl) !== p.endpoint || api.model !== p.model || !credential || api.apiKey !== credential) throw error('当前端点、模型或凭据不在出资授权内');
         if (!['chat', 'memory', 'proactive'].includes(purpose)) throw error('未知付费调用用途');
-        const current = budget.status(context.conversationKey), first = constrainedBody(body, p, false), globalTrial=p.source.mode==='trial'?trial(p):null,globalStatus=globalTrial?.status('private:1');
-        const degraded = current.action !== 'normal' || current.enabled && current.spentCny + current.reservedCny + first.amount >= current.dailyLimitCny * 0.8 || globalStatus && globalStatus.spentCny+globalStatus.reservedCny+first.amount>=globalStatus.dailyLimitCny*.8;
+        const current = budget.status(context.conversationKey), first = constrainedBody(body, p, false), globalTrial=p.source.mode==='trial'?trial(p):null,globalTotal=total(p);
+        const globalChecks=[globalTrial,globalTotal].filter(Boolean).map(ledger=>ledger.status('private:1'));
+        const degraded = current.action !== 'normal' || current.enabled && current.spentCny + current.reservedCny + first.amount >= current.dailyLimitCny * 0.8 || globalChecks.some(s=>s.action!=='normal'||s.spentCny+s.reservedCny+first.amount>=s.dailyLimitCny*.8);
         if (degraded && (purpose !== 'chat' || !direct)) throw error('预算达到80%，已暂停主动参与和后台记忆整理');
         const quote = degraded ? constrainedBody(body, p, true) : first;
         const hold = budget.reserve(context.conversationKey, { operationId, estimatedMaxCost: quote.amount, quote: { currency: 'CNY', complete: true } });
         if (!hold.allowed) throw error(hold.reason || '今日会话预算不足');
         const trialHold=globalTrial?.reserve('private:1',{operationId:'trial:'+operationId,estimatedMaxCost:quote.amount,quote:{currency:'CNY',complete:true}});
         if(trialHold&&!trialHold.allowed)throw error('平台今日体验总额不足');
+        const totalHold=globalTotal?.reserve('private:1',{operationId:'total:'+operationId,estimatedMaxCost:quote.amount,quote:{currency:'CNY',complete:true}});
+        if(totalHold&&!totalHold.allowed)throw error('机器人今日总额度不足');
         const raw = storage.readText('call-attribution'), attribution = raw === null ? {} : JSON.parse(raw);
         attribution[hold.id] = { key:context.conversationKey,mode:p.source.mode,ownerId:p.source.ownerId || null,credentialRef:p.source.credentialRef || null,model:p.model };
         storage.writeText('call-attribution',JSON.stringify(attribution),raw);
-        return { id: hold.id,trialHoldId:trialHold?.id||null,key: context.conversationKey, requestId: context.requestId, model: p.model, endpoint: p.endpoint, sourceId:p.source.id,sourceVersion:p.source.version,
+        return { id: hold.id,trialHoldId:trialHold?.id||null,totalHoldId:totalHold?.id||null,key: context.conversationKey, requestId: context.requestId, model: p.model, endpoint: p.endpoint, sourceId:p.source.id,sourceVersion:p.source.version,
           prices: { ...p.prices }, responseModels: p.verifiedResponseModels || [], body: quote.body, degraded, purpose,
           configFingerprint: fundingFingerprint(p, context.conversationKey) };
       });
@@ -270,14 +296,15 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         const p = authorize(config(), currentConversationContext()); sync(p);
         if (currentConversationContext().conversationKey !== token.key || currentConversationContext().requestId !== token.requestId
           || token.sourceId !== p.source.id || token.sourceVersion !== p.source.version || token.configFingerprint !== fundingFingerprint(p, token.key)) throw error('付费来源或请求配置已变化');
-        const current = budget.status(token.key);
-        if (current.action !== 'normal' && !token.degraded) throw error('费用已达到节流阈值，请按新限制重新发起请求');
+        const current = budget.status(token.key),checks=[current,...[p.source.mode==='trial'?trial(p):null,total(p)].filter(Boolean).map(l=>l.status('private:1'))];
+        if (checks.some(s=>s.action!=='normal') && !token.degraded) throw error('费用已达到节流阈值，请按新限制重新发起请求');
         const raw = storage.readText('interactive-cooldown'), prior = raw === null ? {} : JSON.parse(raw);
         if (!plain(prior) || Object.values(prior).some(x => !plain(x) || typeof x.requestId !== 'string' || !integer(x.at))) throw error('费用节流记录损坏', 'PAID_LEDGER_UNAVAILABLE');
         if (token.degraded && prior[token.key]?.requestId !== token.requestId && now() - (prior[token.key]?.at ?? -Infinity) < 60_000) throw error('预算节流中，请间隔至少60秒再发起回复');
-        if (current.action !== 'normal' && token.purpose !== 'chat') throw error('预算已达到80%，后台调用暂停');
+        if (checks.some(s=>s.action!=='normal') && token.purpose !== 'chat') throw error('预算已达到80%，后台调用暂停');
         if (!budget.dispatch(token.id).mayDispatch) throw error('剩余额度或配置已变化，未发送调用暂停');
         if(token.trialHoldId&&!trial(p).dispatch(token.trialHoldId).mayDispatch)throw error('平台体验总额已变化');
+        if(token.totalHoldId&&!total(p)?.dispatch(token.totalHoldId).mayDispatch)throw error('机器人今日总额度已变化');
         if (token.purpose === 'chat' && prior[token.key]?.requestId !== token.requestId) {
           Object.defineProperty(prior, token.key, { value: { requestId: token.requestId, at: now() }, enumerable: true, configurable: true, writable: true });
           storage.writeText('interactive-cooldown', JSON.stringify(prior), raw);
@@ -288,10 +315,10 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
       let raw; try { raw = JSON.parse(text); } catch { return this.unknown(token, 'invalid_json'); }
       const amount = usageCost(raw, token);
       if (amount === null) return this.unknown(token, 'missing_usage');
-      return storage.transaction(()=>{const value=budget.settle(token.id,{amount,currency:'CNY'});if(token.trialHoldId)trial(effectivePolicy(config())).settle(token.trialHoldId,{amount,currency:'CNY'});return value;});
+      return storage.transaction(()=>{const value=budget.settle(token.id,{amount,currency:'CNY'});if(token.trialHoldId)trial(effectivePolicy(config())).settle(token.trialHoldId,{amount,currency:'CNY'});if(token.totalHoldId)totalBudget.settle(token.totalHoldId,{amount,currency:'CNY'});return value;});
     },
-    unknown(token, reason = 'network_error') { return storage.transaction(()=>{const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});return value;}); },
-    release(token) { return storage.transaction(()=>{const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);return value;}); },
+    unknown(token, reason = 'network_error') { return storage.transaction(()=>{const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});if(token.totalHoldId)totalBudget.markUnknown(token.totalHoldId,{reason});return value;}); },
+    release(token) { return storage.transaction(()=>{const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);if(token.totalHoldId)totalBudget.release(token.totalHoldId);return value;}); },
     attributions() { const raw = storage.readText('call-attribution'); return raw === null ? {} : JSON.parse(raw); },
     serviceStatus(key, limits) { return storage.transaction(()=>{syncService(key,serviceAuthorization(()=>limits));return {scope:speechBudget.status(key),platform:speechTotal.status('private:1')};}); },
     prepareService({ service, operationId=crypto.randomUUID(), amountCny, assertAuthorized,purpose='requested',characters,voiceType }={}) {
@@ -301,15 +328,15 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         const context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(assertAuthorized);sync(p);syncService(context.conversationKey,limits);
         const key=context.conversationKey,operation='service:speech:'+operationId;
         if(budget.records({key}).some(row=>row.operationId===operation))throw error('该语音操作已存在，禁止重复合成');
-        const trialLedger=p.source.mode==='trial'?trial(p):null;
-        const checks=[budget.status(key),speechBudget.status(key),speechTotal.status('private:1'),...(trialLedger?[trialLedger.status('private:1')]:[])];
+        const trialLedger=p.source.mode==='trial'?trial(p):null,totalLedger=total(p);
+        const checks=[budget.status(key),speechBudget.status(key),speechTotal.status('private:1'),...[trialLedger,totalLedger].filter(Boolean).map(l=>l.status('private:1'))];
         if(checks.some(s=>s.action!=='normal'||s.spentCny+s.reservedCny+amountCny>=s.dailyLimitCny*.8))throw error('预算达到80%或语音补贴不足，已停止语音');
-        const holds=[{ledger:budget,key},{ledger:speechBudget,key},{ledger:speechTotal,key:'private:1'},...(trialLedger?[{ledger:trialLedger,key:'private:1'}]:[])].map((item,index)=>{
+        const holds=[{ledger:budget,key},{ledger:speechBudget,key},{ledger:speechTotal,key:'private:1'},...[trialLedger,totalLedger].filter(Boolean).map(ledger=>({ledger,key:'private:1'}))].map((item,index)=>{
           const hold=item.ledger.reserve(item.key,{operationId:index===0?operation:operation+':'+index,estimatedMaxCost:amountCny,quote:{currency:'CNY',complete:true}});
           if(!hold.allowed)throw error('语音剩余额度不足');return {ledger:item.ledger,key:item.key,id:hold.id};
         });
         const token=Object.freeze({id:holds[0].id,key,operationId,amountCny});
-        serviceTokens.set(token,{holds,assertAuthorized,authorization:hash(limits),requestId:context.requestId,sourceId:p.source.id,sourceVersion:p.source.version,state:'reserved'});
+        serviceTokens.set(token,{holds,assertAuthorized,authorization:hash(limits),totalLimit:p.totalDailyLimitCny??null,requestId:context.requestId,sourceId:p.source.id,sourceVersion:p.source.version,state:'reserved'});
         const raw=storage.readText('call-attribution'),rows=raw===null?{}:JSON.parse(raw);
         rows[token.id]={key,kind:'speech',provider:'tencent',mode:'platform-speech',ownerId:null,credentialRef:null,llmFundingMode:p.source.mode,llmOwnerId:p.source.ownerId||null,speechPurpose:purpose,model:'tencent-tts',estimated:true,basis:'list-price-free-package-unsynchronized',...(characters===undefined?{}:{characters}),...(voiceType===undefined?{}:{voiceType})};
         storage.writeText('call-attribution',JSON.stringify(rows),raw);return token;
@@ -317,8 +344,8 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
     },
     dispatchService(token) {
       return storage.transaction(()=>{
-        const state=serviceState(token),context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(state.assertAuthorized);sync(p);syncService(token.key,limits);
-        if(state.state!=='reserved'||context.conversationKey!==token.key||context.requestId!==state.requestId||p.source.id!==state.sourceId||p.source.version!==state.sourceVersion||hash(limits)!==state.authorization)throw error('语音权限或出资已变更');
+        const state=serviceState(token),context=currentConversationContext(),p=authorize(config(),context),limits=serviceAuthorization(state.assertAuthorized);sync(p);syncService(token.key,limits);total(p);
+        if(state.state!=='reserved'||context.conversationKey!==token.key||context.requestId!==state.requestId||p.source.id!==state.sourceId||p.source.version!==state.sourceVersion||hash(limits)!==state.authorization||state.totalLimit!==(p.totalDailyLimitCny??null))throw error('语音权限或出资已变更');
         if(state.holds.some(h=>h.ledger.status(h.key).action!=='normal'))throw error('语音预算达到节流阈值');
         const raw=storage.readText('speech-cooldown'),rows=raw===null?{}:JSON.parse(raw);
         if(!plain(rows)||Object.values(rows).some(row=>!plain(row)||!integer(row.at)))throw error('语音冷却记录损坏','PAID_LEDGER_UNAVAILABLE');

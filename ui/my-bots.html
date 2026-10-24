@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>我的机器人 · QQ Agent</title>
+  <link rel="stylesheet" href="/platform.css">
+  <link rel="stylesheet" href="/my-bots.css">
+  <script defer src="/my-bots.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到内容</a>
+  <header class="bots-header">
+    <a class="brand" href="/workspace.html">QQ Agent<span>聊天管理</span></a>
+    <nav aria-label="工作台导航"><a href="/workspace.html">聊天工作台</a><a href="/my-bots.html" aria-current="page">我的机器人</a></nav>
+    <a class="account-link" href="/workspace.html#account" id="user-label">账号设置</a>
+  </header>
+  <main id="main" tabindex="-1" class="bots-main">
+    <div class="bots-heading"><div><p class="muted">我的 QQ 接入与偏好</p><h1>我的机器人</h1></div><button type="button" id="reload">刷新状态</button></div>
+    <p>使用自己的平台账号发起接入，再用对应 QQ 扫码。接入后由 QQ Agent 处理聊天，你可以单独调整回复与语音偏好。</p>
+    <div id="feedback" role="status" aria-live="polite" hidden></div>
+    <nav id="tabs" class="chat-tabs" aria-label="机器人设置"><button type="button" data-tab="mine" aria-current="page">我的机器人</button></nav>
+    <section id="mine-panel" aria-label="我的机器人">
+      <div class="bots-grid">
+        <section class="panel"><h2>接入自己的 QQ</h2><p id="capacity" class="muted" role="status">正在读取可用名额…</p>
+          <form id="request-form">
+            <label for="bot-name">机器人名称</label><input id="bot-name" name="name" maxlength="80" required autocomplete="off" placeholder="例如：我的小助手">
+            <label for="expected-qq">要接入的 QQ 号</label><input id="expected-qq" name="expectedQQ" inputmode="numeric" pattern="[1-9][0-9]{4,14}" maxlength="15" required autocomplete="off" aria-describedby="qq-help">
+            <p id="qq-help" class="small muted">请填写你本人将用于扫码的 QQ；登录账号不一致时接入会被拒绝。</p>
+            <button class="primary" type="submit" disabled>发起接入</button>
+          </form>
+        </section>
+        <section class="panel"><h2>我的接入记录</h2><div id="requests" aria-live="polite"><p>正在核对登录与接入记录…</p></div></section>
+      </div>
+      <section id="login-panel" class="panel" hidden aria-labelledby="login-title"><h2 id="login-title">扫码登录</h2><div id="login-content"></div></section>
+      <section class="panel" aria-labelledby="preferences-title"><h2 id="preferences-title">机器人偏好</h2>
+        <label for="bot-select">选择我的机器人</label><select id="bot-select" disabled><option value="">暂无可配置的机器人</option></select>
+        <div id="preferences"><p class="muted">完成接入后，可以在这里管理自己的机器人。</p></div>
+      </section>
+    </section>
+    <section id="defaults-panel" class="panel" hidden aria-label="平台默认偏好"></section>
+    <footer class="page-footer"><a href="/help.html">使用帮助</a><span>偏好保存后生效；平台额度和费用授权仍单独管理。</span></footer>
+  </main>
+</body>
+</html>

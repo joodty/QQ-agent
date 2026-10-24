@@ -477,6 +477,9 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
     e && typeof e.atMe === 'boolean'
       ? e.atMe === true
       : isAtMe(String(e?.text ?? ''), { selfNickname, botName, selfId }));
+  if(c.mentionOnly===true)return atMe
+    ?{tier:1,count:historyCount(),reason:'仅艾特：被艾特',shouldRespond:true}
+    :{tier:0,count:0,reason:'仅艾特：未被艾特',shouldRespond:false};
   // 关键词判定剔除 @ 片段：@ 别人的名字里带关键词不该触发（词表有"鱼"
   // ≠ 群友 @ 了"摸鱼小能手"）；正文里的关键词照常命中。
   const keyword = hitKeyword((triggerEntries || []).map((e) => stripMentions(e)).join('\n'), c.keywords);

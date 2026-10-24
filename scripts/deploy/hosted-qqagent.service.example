@@ -1,0 +1,26 @@
+[Unit]
+Description=Private QQ Agent hosted login broker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/qq-agent/release
+ExecStart=/usr/bin/node /opt/qq-agent/release/scripts/hosted-qqagent-service.mjs /etc/qq-agent-hosted/service.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=process
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/var/lib/qq-agent-hosted
+ReadOnlyPaths=/etc/qq-agent-hosted /opt/qq-agent/release
+
+[Install]
+WantedBy=multi-user.target
