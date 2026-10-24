@@ -1,6 +1,6 @@
 # 群管理扩展：从这里接手
 
-2026-10-24：运行源 `717d858` 已部署普通账户本人申请/扫码接入、管理员平台默认及个人业务覆盖、Go目录57款/47款可选，以及统一平台模型和腾讯语音资源。个人Key和付款来源入口已关闭，人设、概率、上下文及语音偏好保留。默认Go DeepSeek，两款完成真实工具调用与结算，不回退旧Key。第二QQ此前被保守内存门槛拦住，正在实测；这个门槛不代表已证明双QQ会内存不足，尚未朋友真实扫码。见[本人接入](HOSTED_BOTS.md)、[统一资源](PLATFORM_RESOURCES.md)和[生产交接](PRODUCTION_HANDOFF.md)。
+2026-10-24：主应用运行源 `717d858` 已部署普通账户本人申请/扫码接入、管理员平台默认及个人业务覆盖、Go目录57款/47款可选，以及统一平台模型和腾讯语音资源。个人Key和付款来源入口已关闭，人设、概率、上下文及语音偏好保留。默认Go DeepSeek，两款完成真实工具调用与结算，不回退旧Key。接入后台增量 `d1665d1` 已按用户要求取消启动前内存预检并启用独立资源池，实际准入为true；已验证原QQ持续运行时第二个空白QQ可显示登录窗口，朋友真实扫码与聊天仍待完成。见[本人接入](HOSTED_BOTS.md)、[统一资源](PLATFORM_RESOURCES.md)和[生产交接](PRODUCTION_HANDOFF.md)。
 
 更新日期：2026-10-24。开发仓库：[joodty/QQ-agent](https://github.com/joodty/QQ-agent/tree/codex/group-management)，分支 `codex/group-management`；上游 [K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)。首次基线为 `fdfd325e148d91845a0aeea3dfdff4cf92fc61a1`，版本 0.4.0。保留上游 MIT 许可和 Kondius 署名。
 
