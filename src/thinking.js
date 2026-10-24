@@ -13,6 +13,8 @@
 //   off / low / medium / high / xhigh / max —— off 是"能思考的模型也明确关闭"，
 //   其余档位含义上都是"开"：强度递增，渠道只支持低档时向下就近映射。
 
+import { COMMANDCODE_GO_MODELS } from './commandcode-go-models.js';
+
 /** 本地/自建端点：不发花哨参数，避免把自建网关打挂。 */
 const LOCAL_HOSTS = /^(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]|host\.docker\.internal)$/i;
 
@@ -27,7 +29,8 @@ const COMMANDCODE_EFFORTS = Object.freeze({
   'deepseek/deepseek-v4.1-flash': Object.freeze(['low', 'high', 'max']),
   'deepseek/deepseek-v4.1-flash-fast': Object.freeze(['low', 'high', 'max']),
   'z-ai/glm-5.3-flash': Object.freeze(['low', 'high', 'max']),
-  'z-ai/glm-5.3-flashx': Object.freeze(['low', 'high', 'max'])
+  'z-ai/glm-5.3-flashx': Object.freeze(['low', 'high', 'max']),
+  ...Object.fromEntries(COMMANDCODE_GO_MODELS.map(row=>[row.id,Object.freeze([...row.thinkingEfforts])]))
 });
 function commandCodeEndpoint(baseUrl) {
   try {

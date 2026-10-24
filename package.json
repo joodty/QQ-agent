@@ -96,7 +96,7 @@
     "check:public": "node scripts/check-platform-publication.mjs",
     "test:archives": "node --test test/conversation-archives-test.mjs test/legacy-archive-export-test.mjs test/legacy-import-cli-test.mjs test/legacy-archive-runtime-test.mjs",
     "test:hosted": "node --test test/bot-preferences-test.mjs test/hosted-bots-test.mjs test/my-bots-ui-test.mjs test/instance-total-budget-test.mjs test/hosted-app-integration-test.mjs test/onebot-hosted-identity-test.mjs test/provider-code-review-findings-test.mjs test/platform-provider-suspension-test.mjs",
-    "test:commandcode": "node --test test/commandcode-transport-test.mjs test/commandcode-llm-test.mjs test/commandcode-orchestrator-test.mjs test/commandcode-thinking-test.mjs test/commandcode-platform-ui-test.mjs"
+    "test:commandcode": "node --test test/commandcode-go-models-test.mjs test/commandcode-transport-test.mjs test/commandcode-llm-test.mjs test/commandcode-orchestrator-test.mjs test/commandcode-thinking-test.mjs test/commandcode-platform-ui-test.mjs"
   },
   "dependencies": {
     "js-yaml": "^5.4.1",

@@ -93,6 +93,7 @@ test('inline images are preserved byte-for-byte with MIME type; unsupported medi
 test('reasoning and temperature use only verified fields without expanding max_tokens', () => {
   const result = build({ ...body(), reasoning_effort: 'high', temperature: 0.2 });
   assert.equal(result.body.params.reasoning_effort, 'high'); assert.equal(result.body.params.temperature, 0.2); assert.equal(result.body.params.max_tokens, 128);
+  for (const effort of ['low','medium','high','xhigh','max']) assert.equal(build({...body(),reasoning_effort:effort}).body.params.reasoning_effort,effort);
   fails(() => build({ ...body(), reasoning_effort: 'unsupported' }), 'UNSUPPORTED_REASONING');
   fails(() => build({ ...body(), temperature: 10 }), 'INVALID_REQUEST');
 });

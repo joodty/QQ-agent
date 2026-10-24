@@ -47,7 +47,8 @@ export function resolvePaidConversationApi(baseApi, { explicitOverride = false }
   const source = sourceFor(getConfig(),context.conversationKey);
   if (source.id !== context.fundingRef?.id || source.version !== context.fundingRef?.version) throw error('出资配置已变更');
   if (explicitOverride && (endpoint(baseApi.baseUrl) !== source.endpoint || baseApi.model !== source.model)) throw error('备选端点或模型未获得此出资授权');
-  return { ...baseApi,baseUrl:source.endpoint,model:source.model,apiKey:source.mode === 'byok' ? source.apiKey : baseApi.apiKey };
+  const targetChanged=endpoint(baseApi.baseUrl)!==source.endpoint||baseApi.model!==source.model;
+  return { ...baseApi,...(targetChanged?{thinkingEffort:'',thinkingMode:'auto',thinkingBudget:0}:{}),baseUrl:source.endpoint,model:source.model,apiKey:source.mode === 'byok' ? source.apiKey : baseApi.apiKey };
 }
 export function capturePaidAuthority(key) {
   const cfg=getConfig();if(!Object.hasOwn(cfg,'productionBudget')&&!fundingServices&&process.env.QQ_AGENT_REQUIRE_BUDGET!=='1')return null;

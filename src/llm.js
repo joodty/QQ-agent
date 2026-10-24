@@ -363,6 +363,7 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
         }
       }
     } catch (error) {
+      if (String(error?.code || '').startsWith('COMMANDCODE_')) throw error;
       skillManager.recordError('thinking', error);
     }
     for (const fn of skillManager.getRequestTransforms(ctx)) {
@@ -449,7 +450,9 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
 
   const baseBody = buildBaseBody();
   if (temp !== null && temp !== undefined && Number.isFinite(Number(temp))) baseBody.temperature = Number(temp);
-  const transformed = await applyRequestTransforms(baseBody);
+  let transformed;
+  try { transformed = await applyRequestTransforms(baseBody); }
+  catch (error) { clearTimeout(timer); throw error; }
   let body = transformed.body;
   const removedTemperature = transformed.removedTemperature;
 

@@ -6,7 +6,7 @@ import {JSDOM,VirtualConsole} from 'jsdom';
 import {waitFor} from './_harness.mjs';
 const html=fs.readFileSync(new URL('../ui/workspace.html',import.meta.url),'utf8'),script=fs.readFileSync(new URL('../ui/platform.js',import.meta.url),'utf8');
 const endpoint='https://api.commandcode.ai/alpha',deepseek='deepseek/deepseek-v4.1-flash',glm='z-ai/glm-5.3-flash';
-const providers=[{endpoint,model:deepseek,thinkingEffortOptions:['','low','high','max']},{endpoint,model:glm,thinkingEffortOptions:['','low','high','max']},{endpoint:'https://approved.example.test/v1',model:'fixture-other-model',thinkingEffortOptions:['']}];
+const providers=[{endpoint,model:deepseek,name:'DeepSeek V4.1 Flash',verified:true,thinkingEffortOptions:['','low','high','max']},{endpoint,model:glm,name:'GLM 5.3 Flash',verified:false,thinkingEffortOptions:['','low','high','max']},{endpoint:'https://approved.example.test/v1',model:'fixture-other-model',thinkingEffortOptions:['']},{endpoint,model:'fixture/cache-write-model',name:'待适配模型',verified:false,disabledReason:'缓存写入费用尚未适配',thinkingEffortOptions:['']}];
 async function mount(t,{role='admin',legacy=false,failSave=false}={}){
   const errors=[],console=new VirtualConsole();console.on('jsdomError',error=>errors.push(error.message));const dom=new JSDOM(html,{url:'https://example.test/workspace.html#admin/models',runScripts:'outside-only',virtualConsole:console});t.after(()=>dom.window.close());const w=dom.window,d=w.document,calls=[];
   let model={version:'fixture-version-1',endpoint,model:deepseek,hasKey:true,providers:structuredClone(providers),thinkingEffort:'',thinkingEffortOptions:['','low','high','max']};if(legacy){delete model.thinkingEffort;delete model.thinkingEffortOptions;model.providers.forEach(p=>delete p.thinkingEffortOptions);}
@@ -41,4 +41,19 @@ test('legacy projections show only model default and failed saves preserve the c
 
 test('ordinary account cannot render or fetch platform model administration',async t=>{
   const x=await mount(t,{role:'user'});assert.equal(x.d.querySelector('[data-action="save-platform-model"]'),null);assert.equal(x.d.querySelector('#platform-thinking-effort'),null);assert.ok(!x.calls.some(c=>c.path==='/api/platform/model-service'));assert.deepEqual(x.errors,[]);
+});
+
+test('catalogue search matches name, exact ID and channel while retaining the selected backend provider index',async t=>{
+  const x=await mount(t),form=x.d.querySelector('[data-action="save-platform-model"]'),search=form.elements.modelSearch,select=form.elements.provider;
+  assert.match(select.options[0].textContent,/DeepSeek V4\.1 Flash.*已验证/);assert.match(select.options[1].textContent,/GLM 5\.3 Flash.*未实测/);assert.equal(select.options[1].disabled,false);assert.equal(select.options[3].disabled,true);assert.match(select.options[3].textContent,/缓存写入费用尚未适配/);assert.match(form.textContent,/未实测模型仍可选择/);assert.match(form.querySelector('details').textContent,/缓存写入费用尚未适配/);
+  const filter=value=>{search.value=value;search.dispatchEvent(new x.w.Event('input',{bubbles:true}));};
+  filter('GLM 5.3');assert.deepEqual([...select.options].map(o=>o.value),['0','1']);assert.equal(select.value,'0');assert.equal(form.elements.apiKey.required,false);assert.equal(x.calls.filter(c=>c.options.method==='PUT').length,0);
+  change(x,'platform-model-provider','1');filter('not-a-real-model');assert.deepEqual([...select.options].map(o=>o.value),['1']);assert.equal(select.value,'1');assert.match(form.querySelector('[data-model-filter-status]').textContent,/当前选择始终保留/);
+  filter('deepseek/deepseek-v4.1-flash');assert.deepEqual([...select.options].map(o=>o.value),['0','1']);filter('Command Code Go');assert.deepEqual([...select.options].map(o=>o.value),['0','1','3']);
+  filter('not-a-real-model');form.dispatchEvent(new x.w.Event('submit',{bubbles:true,cancelable:true}));await waitFor(()=>x.calls.some(c=>c.options.method==='PUT'),5000,'save filtered provider');const saved=x.calls.find(c=>c.options.method==='PUT');assert.equal(saved.body.model,glm);assert.equal(saved.body.endpoint,endpoint);assert.equal(saved.body.modelSearch,undefined);assert.equal(saved.body.apiKey,undefined);
+});
+
+test('disabled catalogue rows and manipulated non-index provider input cannot be submitted',async t=>{
+  const x=await mount(t),form=x.d.querySelector('[data-action="save-platform-model"]');change(x,'platform-model-provider','3');form.dispatchEvent(new x.w.Event('submit',{bubbles:true,cancelable:true}));await waitFor(()=>x.d.querySelector('#feedback').textContent.includes('缓存写入费用尚未适配'),5000,'disabled provider rejection');assert.equal(x.calls.filter(c=>c.options.method==='PUT').length,0);
+  const forged=x.d.createElement('option');forged.value='1e0';forged.textContent='Forged model';form.elements.provider.append(forged);form.elements.provider.value='1e0';form.dispatchEvent(new x.w.Event('submit',{bubbles:true,cancelable:true}));await waitFor(()=>x.d.querySelector('#feedback').textContent.includes('批准目录'),5000,'invalid provider index');assert.equal(x.calls.filter(c=>c.options.method==='PUT').length,0);
 });

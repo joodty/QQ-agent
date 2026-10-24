@@ -1,6 +1,6 @@
 # 群管理扩展：从这里接手
 
-2026-10-24 新要求：恢复普通账户本人申请、本人扫码的独立 QQ Agent 接入；管理员在本人功能上增加平台默认偏好管理，普通账户可覆盖各项业务默认值。实现与边界见 [本人 QQ 接入](HOSTED_BOTS.md)。旧账号和公共 QQ 工作台继续保留，旧 Bridge／DSH 仍停用。运行源 `c340dc0` 已部署；本人入口、偏好及私有 broker 生产验收通过，但节点容量不足，未启动第二 QQ 或扫码。Command Code Provider API 返回 `403 upgrade_required`，平台出资持久暂停；Go 适配仍在调查/开发中，详见下表及[生产交接](PRODUCTION_HANDOFF.md)。
+2026-10-24：普通账户本人申请/扫码的独立 QQ Agent 接入、管理员平台默认偏好及普通账户覆盖已部署。后续运行源 `1171d63` 已部署 Go DeepSeek V4.1 Flash 与 GLM 5.3 Flash 双模型通道，真实工具调用和 follow-up 用量均结算，平台模型服务已恢复；默认使用 Go DeepSeek，不回退旧 DeepSeek API Key。用户追加的完整 Go 模型目录及搜索仍在开发、尚未部署。容量不足，未启动第二 QQ 或扫码；浏览器 IAB 不可用，未做截图验收。旧账号、公共 QQ 工作台和受保护主机服务保持。实现与边界见 [本人 QQ 接入](HOSTED_BOTS.md) 和[生产交接](PRODUCTION_HANDOFF.md)。
 
 更新日期：2026-10-24。开发仓库：[joodty/QQ-agent](https://github.com/joodty/QQ-agent/tree/codex/group-management)，分支 `codex/group-management`；上游 [K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)。首次基线为 `fdfd325e148d91845a0aeea3dfdff4cf92fc61a1`，版本 0.4.0。保留上游 MIT 许可和 Kondius 署名。
 
@@ -34,7 +34,7 @@
 | 引用回复与语音判断 | 修复普通引用回复直接跳过自动语音的分支，独立语音气泡与文字引用回退；运行档案保存不含正文的判断元数据。源 `caec691` 已部署，相关隔离回归73/73，线上设置/恢复任务/原数据保持；未将模拟发送当作手机播放验证 |
 | 完整音色选择 | 官方公开基础接口目录60款（三类14/17/29）、分类/性别/场景/搜索、动态分类报价和受预算固定短句试听已部署，首轮源 `b21f373`、回归188/188，现已随性能版升级。公网角色/目录/设置及数据保留核验通过。原六ID兼容，历史账不重价；[目录及试听](SPEECH_VOICES.md) |
 | 工作台性能 | 已部署运行源 `3d40bbd`：按需 summary/compact、公共目录与静态资源版本缓存、gzip、GET超时重试，语音设置不等待用量；252/252隔离回归通过。公网管理员概览394,071→11,484字节/gzip1,935，语音概览175,393→750字节；源码/扩展摘要、权限、304/no-store、原数据保留通过。详情见工作记录及[缓存边界](WORKSPACE_PERFORMANCE.md)，不得缓存权限为授权依据或恢复旧设置快照 |
-| 本轮生产状态 | 运行源 `c340dc0` 已提交/推送并部署；本人机器人页、偏好及私有 broker 上线，主/gateway/broker active。公网页面与JS/CSS摘要一致；真实接口管理员/普通账户本人 overview 200，普通访问 primary/写 defaults 403、匿名401、非法申请400。23张原业务表逐行一致；8账户、3个QQ绑定及7项语音授权保留；原费用/凭据/人设数据未覆盖，主机受保护服务/原QQ容器未改。容量约868MiB，低于第二QQ门槛1,120,000KiB，未启动第二QQ或真实扫码；浏览器IAB不可用，未声称人工可视验收。Command Code Provider API 实际403 `upgrade_required`，平台出资持久暂停且不回 DeepSeek；Go 适配仍在调查开发中。完整细节见当日[工作记录](WORK_LOG.md)及[生产交接](PRODUCTION_HANDOFF.md) |
+| 本轮生产状态 | 运行源 `1171d63` 已提交/推送并部署，Go DeepSeek V4.1 Flash 与 GLM 5.3 Flash 均真实完成工具调用及 follow-up，共4次 HTTP 200 且 usage 结算；DeepSeek 第二轮 cached 256 tokens。管理员真实 model-service PUT 切换默认并保留空 Key，报价随模型更新；普通 GET/PUT 403、上下文条数80保持。平台 pause/pending 已清除，pause=false、skipBacklog=true，AI 恢复，默认 Go DeepSeek且不回退旧 Key。原23表、8账户/3绑定/7语音授权及费用数据保持，x-ui/Xray/nginx/SSH/dockerd/原 QQ 容器未改。容量仍不足，未启动第二 QQ、扫码或发送真实 QQ 测试消息。回归模型52/52、工作台127/127、托管80/80、原守卫14/14零失败跳过，公开检查198文件通过；严格TLS页面可达但显示401登录页、JS源码匹配。IAB不可用，未宣称截图验收。完整目录/搜索为第二增量开发中，尚未部署。详见当日[工作记录](WORK_LOG.md)及[生产交接](PRODUCTION_HANDOFF.md) |
 
 ## 关键代码
 

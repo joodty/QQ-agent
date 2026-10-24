@@ -85,6 +85,16 @@ test('Command Code uses one guarded native request per tool or memory turn and f
  assert.equal(own.message.content,'Own provider');assert.equal(requests.at(-1).url,ownEndpoint+'/chat/completions');
  assert.equal(requests.at(-1).body.stream,false);assert.equal(requests.at(-1).body.params,undefined);
  assert.equal(requests.at(-1).options.headers.authorization,'Bearer fixture-owner-key');
+ cfg.api.thinkingEffort='max';
+ const ownModel='Qwen/Qwen3.8-Flash';
+ setPaidCallFundingServices({resolve:()=>({id:'fixture-owner-go',version:1,mode:'byok',ownerId:'fixture-owner',endpoint,model:ownModel,prices:cfg.productionBudget.prices,apiKey:'fixture-owner-go-key',scopeAuthorized:true}),policy:()=>({})});
+ respond=()=>ndjson([{type:'text-delta',id:'own-go-text',text:'Owner model default'},{type:'text-end',id:'own-go-text'},{type:'finish',finishReason:'stop',totalUsage:usage}]);
+ await runWithPaidConversation('group:123',()=>chatCompletion({messages}));
+ assert.equal(requests.at(-1).body.params.model,ownModel);
+ assert.equal(requests.at(-1).body.params.reasoning_effort,undefined);
+ const beforeInvalidEffort=requests.length;
+ await assert.rejects(runWithPaidConversation('group:123',()=>chatCompletion({messages,overrides:{...cfg.api,model:ownModel,apiKey:'fixture-owner-go-key',thinkingEffort:'max'}})),{code:'COMMANDCODE_UNSUPPORTED_REASONING'});
+ assert.equal(requests.length,beforeInvalidEffort);
  const beforeCatalog=productionPaidCallGuard().records().length;
  globalThis.fetch=async(url)=>{assert.equal(url,'https://api.commandcode.ai/provider/v1/models');return new Response(JSON.stringify({data:[{id:model}]}));};
  assert.deepEqual(await listModels(),[{id:model}]);

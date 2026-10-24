@@ -86,7 +86,7 @@ export function buildCommandCodeRequest({ api, body } = {}) {
   assert(Array.isArray(input.messages) && input.messages.length > 0 && input.messages.length <= 10000, 'INVALID_REQUEST', 'Command Code messages are missing or oversized');
   assert(input.tool_choice === undefined || ['auto', 'none'].includes(input.tool_choice), 'UNSUPPORTED_TOOL_CHOICE', 'Command Code has no verified forced/required tool-choice field');
   if (input.temperature !== undefined) assert(Number.isFinite(input.temperature) && input.temperature >= 0 && input.temperature <= 2, 'INVALID_REQUEST', 'Invalid Command Code temperature');
-  if (input.reasoning_effort !== undefined) assert(['low', 'high', 'max'].includes(input.reasoning_effort), 'UNSUPPORTED_REASONING', 'Command Code reasoning effort must use its verified vocabulary');
+  if (input.reasoning_effort !== undefined) assert(['low', 'medium', 'high', 'xhigh', 'max'].includes(input.reasoning_effort), 'UNSUPPORTED_REASONING', 'Command Code reasoning effort must use its verified vocabulary');
   assert(input.tools === undefined || Array.isArray(input.tools), 'INVALID_TOOL', 'Command Code tools must be an array');
   const tools = (input.tools || []).map(tool => {
     assert(fields(tool, ['type', 'function']) && tool.type === 'function' && fields(tool.function, ['name', 'description', 'parameters', 'strict'])

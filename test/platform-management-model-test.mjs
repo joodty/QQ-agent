@@ -21,6 +21,23 @@ test('platform model view and updates require a fresh real administrator without
  const view=f.service.get(f.admin);assert.equal(view.model,'fixture-model-a');assert.equal(view.hasKey,true);assert.equal(view.providers.length,3);assert.match(view.version,/^[a-f0-9]{64}$/);assert.doesNotMatch(JSON.stringify(view),/fixture-active-source-key|fixture-unused-direct-key|dshProviderKeys|apiKey/);
  assert.throws(()=>f.service.update(f.user,{expectedVersion:view.version}),e=>e.statusCode===403);
 });
+
+test('Go exposes the full official catalogue, preserves existing quotes, and denies unpriced entries on the server',()=>{
+ const f=fixture(),base='https://api.commandcode.ai/alpha',cfg=getConfig();
+ setRuntimeConfig({...cfg,api:{...cfg.api,baseUrl:base,model:'deepseek/deepseek-v4.1-flash',provider:'',apiKey:'fixture-go-catalogue-key'},productionBudget:{...cfg.productionBudget,endpoint:base,model:'deepseek/deepseek-v4.1-flash',approvedProviders:[]}});
+ const view=f.service.get(f.admin),go=view.providers.filter(row=>row.endpoint===base);
+ assert.equal(go.length,57);assert.ok(go.every(row=>row.name&&typeof row.verified==='boolean'));
+ assert.equal(go.filter(row=>row.verified).length,2);
+ assert.deepEqual(go.find(row=>row.model===view.model).prices,prices);
+ const inactive=go.find(row=>row.disabledReason);assert.ok(inactive);
+ assert.throws(()=>f.service.update(f.admin,{expectedVersion:view.version,endpoint:base,model:inactive.model,thinkingEffort:''}),e=>e.statusCode===400&&e.message===inactive.disabledReason);
+ const choice=go.find(row=>!row.verified&&!row.disabledReason);assert.ok(choice);
+ const saved=f.service.update(f.admin,{expectedVersion:view.version,endpoint:base,model:choice.model,thinkingEffort:'',apiKey:''});
+ assert.equal(saved.model,choice.model);assert.equal(resolveApiKey(getConfig()),'fixture-go-catalogue-key');
+ assert.deepEqual(getConfig().productionBudget.prices,choice.prices);
+ assert.ok(getConfig().productionBudget.approvedProviders.every(row=>!row.disabledReason&&row.prices));
+ assert.doesNotMatch(JSON.stringify(saved),/fixture-go-catalogue-key|apiKey/);
+});
 test('model and effective key update atomically with the budget quote, preserve older BYOK-approved models, and reject stale CAS',()=>{
  const f=fixture(),old=f.service.get(f.admin),before=structuredClone(getConfig());
  const saved=f.service.update(f.admin,{expectedVersion:old.version,endpoint:old.endpoint,model:'fixture-model-b',apiKey:'fixture-new-default-key'});assert.equal(saved.model,'fixture-model-b');assert.equal(saved.hasKey,true);assert.notEqual(saved.version,old.version);
