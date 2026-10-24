@@ -56,16 +56,36 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
   } catch(error){db.close();throw fail('SPEECH_STORAGE_INVALID',503);}
   const receipts=new WeakMap(),previewRequests=new WeakMap(),accountRequests=new WeakMap();let activeSyntheses=0,closed=false;
   function platform(){const p=parse(db.prepare("SELECT value_json FROM speech_meta WHERE name='platform'").get()?.value_json);if(!validPlatform(p))throw fail('SPEECH_STORAGE_INVALID',503);return p;}
+  const resourcesOnly=()=>config()?.platform?.resourcesOnly===true;
   function fresh(principal){try{return auth.verifyPrincipal(principal);}catch{throw fail('SPEECH_UNAUTHENTICATED',401);}}
   function scope(principal,chatKey,write=false){const p=fresh(principal);if(!key(chatKey)||!auth.canAccess(p,chatKey,{botId:'primary',write}))throw fail('SPEECH_ACCESS_DENIED');return p;}
   function admin(principal){const p=fresh(principal);if(p.role!=='admin')throw fail('SPEECH_ACCESS_DENIED');return p;}
   function credential(){const value=credentials?credentials():readSpeechCredential(config()?.speech?.credentialFile);return value===null||value===undefined?null:validateSpeechCredential(value);}
   function rowFor(chatKey){const row=db.prepare('SELECT * FROM speech_scopes WHERE chat_key=?').get(chatKey);if(row&&(!Number.isSafeInteger(row.version)||row.version<1||![0,1].includes(row.enabled)||row.max_chars!==null&&(!Number.isSafeInteger(row.max_chars)||row.max_chars<1||row.max_chars>150)||row.cooldown_ms!==null&&(!Number.isSafeInteger(row.cooldown_ms)||row.cooldown_ms<1000||row.cooldown_ms>3600000)||row.auto_voice_percent!==null&&!percent(row.auto_voice_percent)||!voiceValid({voiceType:row.voice_type??101001,speed:row.speed??0,volume:row.volume??0})))throw fail('SPEECH_STORAGE_INVALID',503);return row;}
-  function subsidy(chatKey){const row=db.prepare('SELECT * FROM speech_subsidies WHERE chat_key=?').get(chatKey);if(!row)return {chatKey,version:0,enabled:false,allowedFundingModes:[],dailyLimitCny:0};const modes=parse(row.modes_json);if(!Number.isSafeInteger(row.version)||row.version<1||![0,1].includes(row.enabled)||!Array.isArray(modes)||new Set(modes).size!==modes.length||modes.some(m=>!['platform','trial','byok'].includes(m))||!Number.isSafeInteger(row.daily_limit_micros)||!money(row.daily_limit_micros/1e6))throw fail('SPEECH_STORAGE_INVALID',503);return {chatKey,version:row.version,enabled:Boolean(row.enabled),allowedFundingModes:modes,dailyLimitCny:row.daily_limit_micros/1e6};}
+  function subsidy(chatKey,{funding}={}){
+    const row=db.prepare('SELECT * FROM speech_subsidies WHERE chat_key=?').get(chatKey),unified=resourcesOnly();
+    if(!row){
+      const empty={chatKey,version:0,enabled:false,allowedFundingModes:unified?['platform']:[],dailyLimitCny:0};
+      if(!unified)return empty;
+      // The source already checks fresh resource authority. Read the effective
+      // ledger limit as it includes business overlays (including old trial caps).
+      // Unknown funding/limits cannot create a grant, and this never persists one.
+      try{
+        const source=funding??capturePaidFunding(chatKey);if(source?.mode!=='platform')return empty;
+        const budget=guard()?.status(chatKey),limit=budget?.dailyLimitCny;
+        if(budget?.enabled!==true||!money(limit))return empty;
+        const dailyLimitCny=Math.min(platform().dailyLimitCny,limit);
+        return {...empty,enabled:dailyLimitCny>0,dailyLimitCny,inherited:true};
+      }catch{return empty;}
+    }
+    const modes=parse(row.modes_json);if(!Number.isSafeInteger(row.version)||row.version<1||![0,1].includes(row.enabled)||!Array.isArray(modes)||new Set(modes).size!==modes.length||modes.some(m=>!['platform','trial','byok'].includes(m))||!Number.isSafeInteger(row.daily_limit_micros)||!money(row.daily_limit_micros/1e6))throw fail('SPEECH_STORAGE_INVALID',503);
+    return {chatKey,version:row.version,enabled:Boolean(row.enabled),allowedFundingModes:unified?['platform']:modes,dailyLimitCny:row.daily_limit_micros/1e6};
+  }
   function projection(chatKey,{compact=false}={}){
-    if(!key(chatKey))throw fail('SPEECH_SCOPE_INVALID');const p=platform(),row=rowFor(chatKey),grant=subsidy(chatKey);let secret=null,reason='';
+    if(!key(chatKey))throw fail('SPEECH_SCOPE_INVALID');const p=platform(),row=rowFor(chatKey);let secret=null,reason='';
     try{secret=credential();}catch{reason='SPEECH_CREDENTIAL_INVALID';}
     let funding;try{funding=capturePaidFunding(chatKey);}catch{reason=reason||'SPEECH_FUNDING_UNAVAILABLE';}
+    const grant=subsidy(chatKey,{funding});
     if(!secret)reason=reason||'SPEECH_NO_CREDENTIAL';
     if(!p.enabled||config()?.speech?.enabled===false)reason=reason||'SPEECH_PLATFORM_DISABLED';
     if(!row?.enabled)reason=reason||'SPEECH_CHAT_DISABLED';
@@ -73,7 +93,7 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
     const voice=validateSpeechVoiceOptions({voiceType:row?.voice_type??p.voiceType,speed:row?.speed??p.speed,volume:row?.volume??p.volume});
     const settings={version:row?.version||0,enabled:Boolean(row?.enabled),maxChars:Math.min(row?.max_chars??p.maxChars,p.maxChars),cooldownMs:Math.max(row?.cooldown_ms??p.cooldownMs,p.cooldownMs),...voice,autoVoicePercent:row?.auto_voice_percent??p.autoVoicePercent,overrides:{voiceType:row?.voice_type??null,speed:row?.speed??null,volume:row?.volume??null,autoVoicePercent:row?.auto_voice_percent??null}};
     const selectedVoice=TENCENT_SPEECH_VOICES.find(v=>v.voiceType===voice.voiceType);
-    const version=hash([p,settings,grant,secret?hash(secret):null,funding,selectedVoice.category,selectedVoice.rateCnyPer10k]);
+    const version=hash([resourcesOnly(),p,settings,grant,secret?hash(secret):null,funding,selectedVoice.category,selectedVoice.rateCnyPer10k]);
     return {public:{chatKey,allowed:!reason,reason:reason||null,configured:Boolean(secret),enabled:p.enabled&&settings.enabled,settings,subsidy:grant,provider:'tencent',...voice,voiceName:selectedVoice.name,category:selectedVoice.category,...(compact?{voiceCatalog:TENCENT_SPEECH_VOICE_CATALOGUE_PUBLIC}:{voices:TENCENT_SPEECH_VOICES}),voiceLimits:SPEECH_VOICE_LIMITS,previewCharacters:PREVIEW_TEXT.length,policyVersion:version,rateCnyPer10k:selectedVoice.rateCnyPer10k,currency:'CNY',estimated:true,estimationBoundary:ESTIMATION_BOUNDARY},secret,funding,version};
   }
   function changed(chatKey){orchestrator?.archiveChanged?.(chatKey);}
@@ -115,14 +135,15 @@ export function createSpeechService({file,auth,store,orchestrator,config=getConf
         if(!voiceValid({voiceType:overrides.voiceType??p.voiceType,speed:overrides.speed??p.speed,volume:overrides.volume??p.volume}))throw fail('SPEECH_VOICE_INVALID',400);
         const autoVoicePercent=Object.hasOwn(fields,'autoVoicePercent')?fields.autoVoicePercent:old?.auto_voice_percent??null;
         if(autoVoicePercent!==null&&!percent(autoVoicePercent))throw fail('SPEECH_SETTINGS_INVALID',400);
-        const grant=subsidy(fields.chatKey);if(fields.enabled&&!grant.enabled)throw fail('SPEECH_SUBSIDY_REQUIRED');
+        const grant=subsidy(fields.chatKey);if(fields.enabled&&(!grant.enabled||resourcesOnly()&&grant.dailyLimitCny<=0))throw fail('SPEECH_SUBSIDY_REQUIRED');
+        if(fields.enabled&&resourcesOnly()){let source;try{source=capturePaidFunding(fields.chatKey);}catch{throw fail('SPEECH_FUNDING_UNAVAILABLE');}if(source.mode!=='platform')throw fail('SPEECH_SUBSIDY_REQUIRED');}
         if(fields.enabled&&!credential())throw fail('SPEECH_NO_CREDENTIAL');
         db.prepare('INSERT INTO speech_scopes VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_key) DO UPDATE SET version=excluded.version,enabled=excluded.enabled,max_chars=excluded.max_chars,cooldown_ms=excluded.cooldown_ms,voice_type=excluded.voice_type,speed=excluded.speed,volume=excluded.volume,auto_voice_percent=excluded.auto_voice_percent').run(fields.chatKey,version+1,fields.enabled?1:0,fields.maxChars??old?.max_chars??null,fields.cooldownMs??old?.cooldown_ms??null,overrides.voiceType,overrides.speed,overrides.volume,autoVoicePercent);
         changed(fields.chatKey);return projection(fields.chatKey).public;
       });
     },
     updatePlatform(principal,fields){admin(principal);if(!exact(fields,['expectedVersion','enabled','maxChars','cooldownMs','dailyLimitCny','voiceType','speed','volume','autoVoicePercent']))throw fail('SPEECH_SETTINGS_INVALID',400);return transact(()=>{const old=platform();if(fields.expectedVersion!==old.version)throw fail('SPEECH_VERSION_CONFLICT',409);const next={...old,...Object.fromEntries(Object.entries(fields).filter(([k])=>k!=='expectedVersion')),version:old.version+1};if(!validPlatform(next))throw fail('SPEECH_SETTINGS_INVALID',400);if(next.enabled&&!credential())throw fail('SPEECH_NO_CREDENTIAL');db.prepare("UPDATE speech_meta SET value_json=? WHERE name='platform'").run(JSON.stringify(next));for(const row of db.prepare('SELECT chat_key FROM speech_scopes').all())changed(row.chat_key);return service.platformOverview(principal);});},
-    updateSubsidy(principal,fields){admin(principal);if(!exact(fields,['chatKey','expectedVersion','enabled','allowedFundingModes','dailyLimitCny'])||!key(fields.chatKey)||typeof fields.enabled!=='boolean'||!Array.isArray(fields.allowedFundingModes)||!fields.allowedFundingModes.length||new Set(fields.allowedFundingModes).size!==fields.allowedFundingModes.length||fields.allowedFundingModes.some(m=>!['platform','trial','byok'].includes(m))||!money(fields.dailyLimitCny)||fields.enabled&&fields.dailyLimitCny<=0)throw fail('SPEECH_SUBSIDY_INVALID',400);scope(principal,fields.chatKey,true);return transact(()=>{const old=subsidy(fields.chatKey);if(fields.expectedVersion!==old.version)throw fail('SPEECH_VERSION_CONFLICT',409);db.prepare('INSERT INTO speech_subsidies VALUES(?,?,?,?,?) ON CONFLICT(chat_key) DO UPDATE SET version=excluded.version,enabled=excluded.enabled,modes_json=excluded.modes_json,daily_limit_micros=excluded.daily_limit_micros').run(fields.chatKey,old.version+1,fields.enabled?1:0,JSON.stringify(fields.allowedFundingModes),Math.round(fields.dailyLimitCny*1e6));changed(fields.chatKey);return subsidy(fields.chatKey);});},
+    updateSubsidy(principal,fields){admin(principal);if(!exact(fields,['chatKey','expectedVersion','enabled','allowedFundingModes','dailyLimitCny'])||!key(fields.chatKey)||typeof fields.enabled!=='boolean'||!Array.isArray(fields.allowedFundingModes)||!fields.allowedFundingModes.length||new Set(fields.allowedFundingModes).size!==fields.allowedFundingModes.length||fields.allowedFundingModes.some(m=>!(resourcesOnly()?['platform']:['platform','trial','byok']).includes(m))||!money(fields.dailyLimitCny)||fields.enabled&&fields.dailyLimitCny<=0)throw fail('SPEECH_SUBSIDY_INVALID',400);scope(principal,fields.chatKey,true);return transact(()=>{const old=subsidy(fields.chatKey);if(fields.expectedVersion!==old.version)throw fail('SPEECH_VERSION_CONFLICT',409);db.prepare('INSERT INTO speech_subsidies VALUES(?,?,?,?,?) ON CONFLICT(chat_key) DO UPDATE SET version=excluded.version,enabled=excluded.enabled,modes_json=excluded.modes_json,daily_limit_micros=excluded.daily_limit_micros').run(fields.chatKey,old.version+1,fields.enabled?1:0,JSON.stringify(fields.allowedFundingModes),Math.round(fields.dailyLimitCny*1e6));changed(fields.chatKey);return subsidy(fields.chatKey);});},
     assertCurrent(receipt){const captured=receipts.get(receipt);if(!captured)throw fail('SPEECH_RECEIPT_INVALID');const current=projection(captured.key);if(!current.public.allowed||current.version!==captured.version)throw fail('SPEECH_AUTHORIZATION_CHANGED');captured.assertPreviewAuthority?.();assertPaidAuthority(captured.key,captured.authority);store?.assertArchiveCurrent?.(captured.key,captured.archive);if(captured.signal?.aborted)throw fail('SPEECH_CANCELLED');return true;},
     async preview(principal,fields,{signal}={}){
       if(!exact(fields,['chatKey','voiceType','expectedPolicyVersion'])||Object.keys(fields).length!==3||typeof fields.expectedPolicyVersion!=='string'||!/^\w{64}$/.test(fields.expectedPolicyVersion))throw fail('SPEECH_SETTINGS_INVALID',400);

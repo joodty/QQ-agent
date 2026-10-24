@@ -158,6 +158,10 @@ export function createPlatformStore({ file, now = Date.now } = {}) {
     },
     binding: getBinding,
     permissionVersion,
+    resourceCandidates(botId='primary',{includeBindings=false}={}) {
+      return readSnapshot(()=>[...db.prepare('SELECT s.account_id AS id,s.conversation_key AS key,0 AS binding FROM account_scopes s JOIN accounts a ON a.id=s.account_id WHERE s.bot_id=? AND a.disabled=0').all(botOf(botId)),
+        ...(includeBindings?db.prepare("SELECT b.user_id AS id,'private:'||b.qq AS key,1 AS binding FROM qq_bindings b JOIN accounts a ON a.id=b.user_id WHERE a.disabled=0").all():[])]);
+    },
     scopeAllowed(userId, key, botId = 'primary') {
       const scope = db.prepare('SELECT p.* FROM account_scopes s LEFT JOIN scope_proofs p ON p.account_id=s.account_id AND p.bot_id=s.bot_id AND p.conversation_key=s.conversation_key WHERE s.account_id=? AND s.bot_id=? AND s.conversation_key=?').get(userId, botId, key);
       return !!scope && !scope.revoked && (scope.source !== 'qq-group' || scope.expires_at > now());

@@ -1,6 +1,6 @@
 # 群管理扩展：从这里接手
 
-2026-10-24：普通账户本人申请/扫码的独立 QQ Agent 接入、管理员平台默认偏好及普通账户覆盖已部署。后续运行源 `1171d63` 已部署 Go DeepSeek V4.1 Flash 与 GLM 5.3 Flash 双模型通道，真实工具调用和 follow-up 用量均结算，平台模型服务已恢复；默认使用 Go DeepSeek，不回退旧 DeepSeek API Key。用户追加的完整 Go 模型目录及搜索仍在开发、尚未部署。容量不足，未启动第二 QQ 或扫码；浏览器 IAB 不可用，未做截图验收。旧账号、公共 QQ 工作台和受保护主机服务保持。实现与边界见 [本人 QQ 接入](HOSTED_BOTS.md) 和[生产交接](PRODUCTION_HANDOFF.md)。
+2026-10-24：普通账户本人申请/扫码的独立 QQ Agent 接入、管理员平台默认偏好及个人业务覆盖已部署。运行源 c9d10c4 已上线 Go 目录57款、47款可选与搜索，两款完成真实工具调用和用量结算；平台模型已恢复，默认Go DeepSeek，不回退旧Key。随后按用户要求开发统一平台模型与腾讯语音资源，关闭个人Key和付款来源入口，保留人设、概率、上下文及语音偏好。第二QQ此前被保守内存门槛拦住，正在依据用户双开经验复查，尚未真实扫码。见[本人接入](HOSTED_BOTS.md)、[统一资源](PLATFORM_RESOURCES.md)和[生产交接](PRODUCTION_HANDOFF.md)。
 
 更新日期：2026-10-24。开发仓库：[joodty/QQ-agent](https://github.com/joodty/QQ-agent/tree/codex/group-management)，分支 `codex/group-management`；上游 [K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)。首次基线为 `fdfd325e148d91845a0aeea3dfdff4cf92fc61a1`，版本 0.4.0。保留上游 MIT 许可和 Kondius 署名。
 

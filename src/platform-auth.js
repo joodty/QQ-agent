@@ -108,6 +108,17 @@ export function createPlatformAuth({ file, store: suppliedStore, publicOrigin, b
     verifyPrincipal, listScopes,
     canAccess(principal, key, options) { try { return store.readSnapshot(() => ownerCanAccess(verifyPrincipal(principal).id, key, options)); } catch { return false; } },
     canUseResourceOwner: ownerCanAccess,
+    resourceOwners(key,{botId:wantedBot=botId}={}) {
+      key=normalizePlatformScopeKey(key);
+      return store.readSnapshot(()=>store.resourceCandidates(wantedBot,{includeBindings:wantedBot===botId})
+        .filter(row=>row.key===key&&(row.binding||store.scopeAllowed(row.id,key,wantedBot)))
+        .filter((row,index,all)=>all.findIndex(value=>value.id===row.id)===index)
+        .map(row=>({id:row.id,permissionVersion:store.permissionVersion(row.id,key,wantedBot)})).sort((a,b)=>a.id.localeCompare(b.id)));
+    },
+    resourceKeys({botId:wantedBot=botId}={}) {
+      return store.readSnapshot(()=>[...new Set(store.resourceCandidates(wantedBot,{includeBindings:wantedBot===botId})
+        .filter(row=>row.binding||store.scopeAllowed(row.id,row.key,wantedBot)).map(row=>row.key))].sort());
+    },
     permissionVersion(userId, key, { botId: wantedBot = botId } = {}) { return store.permissionVersion(userId, normalizePlatformScopeKey(key), wantedBot); },
     invalidateGroup({ botId: wantedBot = botId, groupId, userId } = {}) { return store.invalidateGroup(wantedBot, groupId, userId); },
     async ensureAccess(principal, key, options = {}) {

@@ -47,6 +47,7 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
   }catch(e){db.close();throw e;}
   const transact = work => { db.exec('BEGIN IMMEDIATE');try{const result=work();db.exec('COMMIT');return result;}catch(e){try{db.exec('ROLLBACK');}catch{}throw e;} };
   const fresh = principal => auth.verifyPrincipal(principal);
+  const resourcesOnly = () => config().platform?.resourcesOnly === true;
   const scope = (principal,chatKey,write=false) => { const p=fresh(principal);if(!key(chatKey)||!auth.canAccess(p,chatKey,{botId:'primary',write}))throw fail('没有这个聊天的管理权限',403);return p; };
   const admin = principal => {const p=fresh(principal);if(p.role!=='admin')throw fail('仅平台管理员可修改平台默认配置',403);return p;};
   const settings = () => ({trialEnabled:true,trialDailyLimitCny:.1,trialPlatformDailyLimitCny:1,trialInitialSpent:{},...json(db.prepare("SELECT value_json FROM business_meta WHERE name='settings'").get()?.value_json || '{}')});
@@ -61,8 +62,32 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
   // remain private to their associated chats; they are not public templates.
   for(const p of archives.personas()){const source=p.history.find(h=>h?.kind==='legacy-member-card-source');if(label(source?.ownerUserId))db.prepare('INSERT INTO business_personas VALUES(?,?,?,?,?,0) ON CONFLICT DO NOTHING').run(p.id,source.ownerUserId,null,null,p.version);}
   const credentialView = row => ({id:row.id,name:row.name,endpoint:row.endpoint,model:row.model,enabled:row.enabled===1,version:row.version,hasKey:Boolean(row.ciphertext),reason:row.reason||null});
+  function platformResourceSource(chatKey,row) {
+    if(!key(chatKey))return {blocked:true};
+    const cfg=config(),p=validateProductionBudgetConfig(cfg),kind=chatKey.startsWith('group:')?'groups':'private',number=chatKey.split(':')[1];
+    if(cfg.deny?.[kind]?.map(String).includes(number))return {blocked:true};
+    const grant=p.funding[chatKey];
+    if(grant&&(grant.enabled!==true||grant.mode==='disabled'))return {blocked:true};
+    let ownerId=null,permission='configured',scopeAuthorized=Boolean(row);
+    if(row){
+      if(!row.enabled||row.mode==='disabled'||!auth.canUseResourceOwner(row.owner_id,chatKey,{botId:'primary'}))return {blocked:true};
+      ownerId=row.owner_id;permission=auth.permissionVersion?.(ownerId,chatKey,{botId:'primary'})||'initial';
+    }else{
+      // Only the auth service may enumerate resource owners. In particular,
+      // administrator-wide access is not an owner claim for an arbitrary key.
+      const owners=(auth.resourceOwners?.(chatKey,{botId:'primary'})||[])
+        .filter(owner=>label(owner?.id)&&auth.canUseResourceOwner(owner.id,chatKey,{botId:'primary'}))
+        .map(owner=>({id:owner.id,permissionVersion:owner.permissionVersion??auth.permissionVersion?.(owner.id,chatKey,{botId:'primary'})??'initial'}))
+        .sort((a,b)=>a.id.localeCompare(b.id));
+      if(owners.length){ownerId=owners[0].id;permission=owners;scopeAuthorized=true;}
+      else if(grant?.mode!=='platform'||grant.enabled!==true||!cfg.allow?.[kind]?.map(String).includes(number))return {blocked:true};
+    }
+    const stamp=hash({resourcesOnly:true,ownerId,permission}).slice(0,20);
+    return {id:'platform-resources:'+chatKey+':'+stamp,version:row?.version||1,mode:'platform',ownerId,scopeAuthorized,
+      endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels||[],imageTokensPerImage:p.imageTokensPerImage};
+  }
   function resolveFunding(chatKey) {
-    const row=fundingRow(chatKey);if(!row)return null;
+    const row=fundingRow(chatKey);if(resourcesOnly())return platformResourceSource(chatKey,row);if(!row)return null;
     if(!row.enabled||row.mode==='disabled'||!auth.canUseResourceOwner(row.owner_id,chatKey,{botId:'primary'}))return {blocked:true};
     const stamp=hash(auth.permissionVersion?.(row.owner_id,chatKey,{botId:'primary'})||'initial').slice(0,20);
     const p=validateProductionBudgetConfig(config()),base={id:row.mode+':'+row.chat_key+':'+stamp,version:row.version,mode:row.mode,ownerId:row.owner_id,scopeAuthorized:true,endpoint:p.endpoint,model:p.model,prices:p.prices,responseModels:p.verifiedResponseModels||[],imageTokensPerImage:p.imageTokensPerImage};
@@ -74,8 +99,8 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
     if(row.mode==='trial'&&(!settings().trialEnabled||!chatKey.startsWith('private:')))return {blocked:true};
     return base;
   }
-  function effectiveFunding(chatKey) {const row=fundingRow(chatKey),p=validateProductionBudgetConfig(config()),limit=p.overrides[chatKey]??p.defaultDailyLimitCny;if(!row)return {chatKey,mode:p.funding[chatKey]?.enabled&&p.funding[chatKey]?.mode==='platform'?'platform':'disabled',version:0,credentialRef:null,enabled:Boolean(p.funding[chatKey]?.enabled),dailyLimitCny:limit};const source=resolveFunding(chatKey);return {chatKey,mode:row.mode,version:row.version,credentialRef:row.credential_id,enabled:!source?.blocked,dailyLimitCny:row.mode==='trial'?Math.min(limit,row.daily_limit_micros===null?settings().trialDailyLimitCny:row.daily_limit_micros/1e6):limit};}
-  function policyOverlay(){const overrides={},p=validateProductionBudgetConfig(config()),rows=db.prepare('SELECT * FROM business_funding WHERE enabled=1').all();for(const row of rows)if(row.mode==='trial')overrides[row.chat_key]=Math.min(row.daily_limit_micros===null?settings().trialDailyLimitCny:row.daily_limit_micros/1e6,p.overrides[row.chat_key]??Infinity);const s=settings();return {overrides,scopeKeys:rows.map(row=>row.chat_key),trial:{dailyLimitCny:s.trialPlatformDailyLimitCny,initialSpent:s.trialInitialSpent}};}
+  function effectiveFunding(chatKey) {const row=fundingRow(chatKey),p=validateProductionBudgetConfig(config()),limit=p.overrides[chatKey]??p.defaultDailyLimitCny;if(resourcesOnly()){const source=resolveFunding(chatKey);return {chatKey,mode:source.blocked?'disabled':'platform',version:row?.version||0,credentialRef:null,enabled:!source.blocked,dailyLimitCny:row?.mode==='trial'?Math.min(limit,row.daily_limit_micros===null?settings().trialDailyLimitCny:row.daily_limit_micros/1e6):limit};}if(!row)return {chatKey,mode:p.funding[chatKey]?.enabled&&p.funding[chatKey]?.mode==='platform'?'platform':'disabled',version:0,credentialRef:null,enabled:Boolean(p.funding[chatKey]?.enabled),dailyLimitCny:limit};const source=resolveFunding(chatKey);return {chatKey,mode:row.mode,version:row.version,credentialRef:row.credential_id,enabled:!source?.blocked,dailyLimitCny:row.mode==='trial'?Math.min(limit,row.daily_limit_micros===null?settings().trialDailyLimitCny:row.daily_limit_micros/1e6):limit};}
+  function policyOverlay(){const overrides={},p=validateProductionBudgetConfig(config()),rows=db.prepare('SELECT * FROM business_funding WHERE enabled=1').all();for(const row of rows)if(row.mode==='trial')overrides[row.chat_key]=Math.min(row.daily_limit_micros===null?settings().trialDailyLimitCny:row.daily_limit_micros/1e6,p.overrides[row.chat_key]??Infinity);const s=settings();return {overrides,scopeKeys:[...new Set([...rows.map(row=>row.chat_key),...(resourcesOnly()?auth.resourceKeys?.({botId:'primary'})||[]:[])])],trial:{dailyLimitCny:s.trialPlatformDailyLimitCny,initialSpent:s.trialInitialSpent}};}
   if(installFunding)setPaidCallFundingServices({resolve:resolveFunding,policy:policyOverlay});
   function visiblePersonas(principal,chatKey) {
     const p=scope(principal,chatKey),associated=new Set(archives.list(chatKey).map(a=>a.personaId));
@@ -97,8 +122,8 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
     runtimeAllowed(chatKey){try{const source=resolveFunding(chatKey),p=validateProductionBudgetConfig(config());return Boolean(source&&!source.blocked||!source&&p.funding[chatKey]?.mode==='platform'&&p.funding[chatKey]?.enabled);}catch{return false;}},
     overview(principal,{summary=false}={}){
       const p=fresh(principal),keys=auth.listScopes(p,{botId:'primary'}),guard=productionPaidCallGuard();
-      return {role:p.role,providers:providers().map(({endpoint,model,prices})=>({endpoint,model,prices,currency:'CNY'})),
-        ...(summary?{accountId:p.id,credentialCount:db.prepare('SELECT COUNT(*) count FROM business_credentials WHERE owner_id=?').get(p.id).count}:{}),
+      return {role:p.role,...(resourcesOnly()?{platformResourcesOnly:true,platformModel:{model:validateProductionBudgetConfig(config()).model}}:{}),providers:providers().map(({endpoint,model,prices})=>({endpoint,model,prices,currency:'CNY'})),
+        ...(summary?{accountId:p.id,credentialCount:resourcesOnly()?0:db.prepare('SELECT COUNT(*) count FROM business_credentials WHERE owner_id=?').get(p.id).count}:{}),
         scopes:keys.map(chatKey=>{
           const archiveList=archives.list(chatKey);
           // list() reads indexed metadata only. A home-page summary must not
@@ -116,8 +141,8 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
     applyPersona(principal,fields){if(!exact(fields,['chatKey','personaId','expectedSelectionVersion','newConversation'])||fields.newConversation!==undefined&&typeof fields.newConversation!=='boolean')throw fail('应用人设字段无效');const p=scope(principal,fields.chatKey,true);if(!visiblePersonas(p,fields.chatKey).some(v=>v.id===fields.personaId))throw fail('人设不可见',403);const previous=!fields.newConversation&&archives.list(fields.chatKey).filter(a=>a.continuation==='ready'&&a.personaId===fields.personaId).sort((a,b)=>b.lastUsedAt-a.lastUsedAt||a.id.localeCompare(b.id))[0];if(previous)return {...service.selectArchive(p,{chatKey:fields.chatKey,archiveId:previous.id,expectedVersion:fields.expectedSelectionVersion}),reused:true};return {...service.createArchive(p,{chatKey:fields.chatKey,personaId:fields.personaId,expectedSelectionVersion:fields.expectedSelectionVersion}),reused:false};},
     messages(principal,{chatKey,archiveId,limit=100}){scope(principal,chatKey);if(!Number.isSafeInteger(limit)||limit<1||limit>500)throw fail('消息条数无效');const state=archives.readChat(chatKey,archiveId),messages=state?.messages??(archiveId===undefined&&store?.listChats?.().includes(chatKey)?store.recent(chatKey,{limit}):[]);return {archiveId:state?.archiveId||null,messages:messages.slice(-limit).map(({id,senderName,text,ts,self})=>({id,senderName,text,ts,self}))};},
     selectArchive(principal,fields){if(!exact(fields,['chatKey','archiveId','expectedVersion']))throw fail('切换档案字段无效');scope(principal,fields.chatKey,true);return {selected:switchConversationArchive({store,orchestrator,...fields})};},
-    credentials(principal){const p=fresh(principal);return {credentials:db.prepare('SELECT * FROM business_credentials WHERE owner_id=? ORDER BY name,id').all(p.id).map(credentialView)};},
-    saveCredential(principal,fields){const p=fresh(principal);if(!exact(fields,['id','expectedVersion','name','endpoint','model','apiKey','enabled'])||!label(fields.name)||fields.enabled!==undefined&&typeof fields.enabled!=='boolean'||fields.apiKey!==undefined&&typeof fields.apiKey!=='string')throw fail('API配置字段无效');const catalog=approved(fields.endpoint,fields.model);if(!catalog)throw fail('端点或模型不在平台批准且有完整报价的目录中');return transact(()=>{const old=fields.id?db.prepare('SELECT * FROM business_credentials WHERE id=? AND owner_id=?').get(fields.id,p.id):null;if(fields.id&&!old)throw fail('API配置不存在',404);if(old&&fields.expectedVersion!==old.version)throw fail('API配置已被修改',409);if(old&&old.endpoint!==catalog.endpoint&&!fields.apiKey?.trim())throw fail('更换API服务地址必须明确填写该服务的新Key');const secret=fields.apiKey?.trim()||(old?unseal(old):'');if(!secret||secret.length>8192||/[\x00-\x1f\x7f]/.test(secret))throw fail('请填写有效API Key');const row={id:old?.id||uid('credential'),owner_id:p.id,name:fields.name,endpoint:catalog.endpoint,model:catalog.model,version:(old?.version||0)+1,enabled:fields.enabled===false?0:1};const encrypted=seal(secret,aad(row));db.prepare('INSERT INTO business_credentials VALUES(?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,endpoint=excluded.endpoint,model=excluded.model,iv=excluded.iv,ciphertext=excluded.ciphertext,tag=excluded.tag,version=excluded.version,enabled=excluded.enabled,reason=NULL').run(row.id,row.owner_id,row.name,row.endpoint,row.model,encrypted.iv,encrypted.ciphertext,encrypted.tag,row.version,row.enabled);return {credential:credentialView({...row,...encrypted})};});},
+    credentials(principal){const p=fresh(principal);if(resourcesOnly())return {credentials:[],disabled:true};return {credentials:db.prepare('SELECT * FROM business_credentials WHERE owner_id=? ORDER BY name,id').all(p.id).map(credentialView)};},
+    saveCredential(principal,fields){const p=fresh(principal);if(resourcesOnly())throw fail('模型服务由平台统一提供，无需配置个人API Key',403);if(!exact(fields,['id','expectedVersion','name','endpoint','model','apiKey','enabled'])||!label(fields.name)||fields.enabled!==undefined&&typeof fields.enabled!=='boolean'||fields.apiKey!==undefined&&typeof fields.apiKey!=='string')throw fail('API配置字段无效');const catalog=approved(fields.endpoint,fields.model);if(!catalog)throw fail('端点或模型不在平台批准且有完整报价的目录中');return transact(()=>{const old=fields.id?db.prepare('SELECT * FROM business_credentials WHERE id=? AND owner_id=?').get(fields.id,p.id):null;if(fields.id&&!old)throw fail('API配置不存在',404);if(old&&fields.expectedVersion!==old.version)throw fail('API配置已被修改',409);if(old&&old.endpoint!==catalog.endpoint&&!fields.apiKey?.trim())throw fail('更换API服务地址必须明确填写该服务的新Key');const secret=fields.apiKey?.trim()||(old?unseal(old):'');if(!secret||secret.length>8192||/[\x00-\x1f\x7f]/.test(secret))throw fail('请填写有效API Key');const row={id:old?.id||uid('credential'),owner_id:p.id,name:fields.name,endpoint:catalog.endpoint,model:catalog.model,version:(old?.version||0)+1,enabled:fields.enabled===false?0:1};const encrypted=seal(secret,aad(row));db.prepare('INSERT INTO business_credentials VALUES(?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,endpoint=excluded.endpoint,model=excluded.model,iv=excluded.iv,ciphertext=excluded.ciphertext,tag=excluded.tag,version=excluded.version,enabled=excluded.enabled,reason=NULL').run(row.id,row.owner_id,row.name,row.endpoint,row.model,encrypted.iv,encrypted.ciphertext,encrypted.tag,row.version,row.enabled);return {credential:credentialView({...row,...encrypted})};});},
     funding(principal,chatKey){scope(principal,chatKey);return effectiveFunding(chatKey);},
     setFunding(principal,fields){if(!exact(fields,['chatKey','mode','credentialRef','expectedVersion','dailyLimitCny'])||!['platform','byok','disabled'].includes(fields.mode)||fields.dailyLimitCny!==undefined&&!money(fields.dailyLimitCny))throw fail('出资配置无效');const p=scope(principal,fields.chatKey,true);return transact(()=>{const old=fundingRow(fields.chatKey);if(fields.expectedVersion!==undefined&&fields.expectedVersion!==(old?.version??0))throw fail('出资配置已变更',409);let mode=fields.mode;if(mode==='platform'&&p.role!=='admin'){if(fields.chatKey!=='private:'+p.boundQQ||!settings().trialEnabled)throw fail('平台体验仅支持绑定本人的私聊',403);if(fields.dailyLimitCny!==undefined&&fields.dailyLimitCny>settings().trialDailyLimitCny)throw fail('不能提高平台体验额度',403);mode='trial';}if(mode==='byok'&&!db.prepare('SELECT 1 FROM business_credentials WHERE id=? AND owner_id=? AND enabled=1').get(fields.credentialRef,p.id))throw fail('请使用自己已启用的API配置',403);db.prepare('INSERT INTO business_funding VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_key) DO UPDATE SET owner_id=excluded.owner_id,mode=excluded.mode,credential_id=excluded.credential_id,version=excluded.version,daily_limit_micros=excluded.daily_limit_micros,enabled=excluded.enabled').run(fields.chatKey,p.id,mode,mode==='byok'?fields.credentialRef:null,(old?.version??0)+1,mode==='trial'&&old?.mode==='trial'?old.daily_limit_micros:null,mode==='disabled'?0:1);if(mode!=='disabled'&&fields.dailyLimitCny!==undefined)updateConfig({productionBudget:{overrides:{[fields.chatKey]:fields.dailyLimitCny}}});orchestrator?.archiveChanged?.(fields.chatKey);return effectiveFunding(fields.chatKey);});},
     budgets(principal){const p=fresh(principal),guard=productionPaidCallGuard(),native=p.role==='admin'?productionBudgetOverview():null;return {currency:'CNY',estimated:true,...(native?{version:native.version,defaultDailyLimitCny:native.defaultDailyLimitCny,overrides:native.overrides}:{}),settings:p.role==='admin'?settings():{trialDailyLimitCny:settings().trialDailyLimitCny},...(p.role==='admin'?{trialPlatformBudget:guard.trialStatus()}:{}),conversations:auth.listScopes(p).map(chatKey=>({...guard.status(chatKey),funding:effectiveFunding(chatKey)}))};},
@@ -160,6 +185,22 @@ export function createPlatformBusiness({file,keyFile=typeof file==='string'?file
       return report;
     },
     close(){if(installFunding)setPaidCallFundingServices(null);master.fill(0);db.close();},
+  };
+  // Old pages/API clients cannot re-enable personal credentials or change the
+  // payer under the shared-resource policy. Platform administrators retain the
+  // existing explicit platform-grant and budget controls.
+  const setFunding=service.setFunding,updateBudget=service.updateBudget;
+  service.setFunding=(principal,fields)=>{
+    if(resourcesOnly()){
+      const p=fresh(principal);
+      if(p.role!=='admin'||fields?.mode!=='platform'||fields.credentialRef!=null)
+        throw fail('模型和语音资源由平台统一提供，不能切换付款来源',403);
+    }
+    return setFunding(principal,fields);
+  };
+  service.updateBudget=(principal,patch)=>{
+    if(resourcesOnly()&&fresh(principal).role!=='admin')throw fail('仅平台管理员可调整平台资源的每日额度',403);
+    return updateBudget(principal,patch);
   };
   return service;
 }

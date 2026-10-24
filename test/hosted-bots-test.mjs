@@ -229,6 +229,10 @@ test('private model template refuses identity/data injection and requires bounde
   }
   fs.writeFileSync(file, JSON.stringify(valid), { mode: 0o600 });
   assert.ok(createDockerQQAgentRuntime(config));
+  fs.writeFileSync(file, JSON.stringify({...valid,platform:{resourcesOnly:true}}), {mode:0o600});
+  assert.ok(createDockerQQAgentRuntime(config));
+  fs.writeFileSync(file, JSON.stringify({...valid,platform:{resourcesOnly:true,enabled:true}}), {mode:0o600});
+  assert.throws(()=>createDockerQQAgentRuntime(config));
 });
 
 test('Docker login capture emits only a visible fixed login window and rechecks account identity', async t => {

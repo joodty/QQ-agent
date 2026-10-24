@@ -202,11 +202,12 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
     const stat = fs.lstatSync(config.modelTemplateFile);
     if (!stat.isFile() || stat.isSymbolicLink() || process.platform !== 'win32' && (stat.mode & 0o077) !== 0 || stat.size > 1024 * 1024) throw Error('Hosted model template must be a private regular file');
     const value = JSON.parse(fs.readFileSync(config.modelTemplateFile, 'utf8'));
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['api', 'providers', 'dshProviderKeys', 'productionBudget', 'speech', 'hostedFundingLimits'].includes(key))
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['api', 'providers', 'dshProviderKeys', 'productionBudget', 'speech', 'hostedFundingLimits', 'platform'].includes(key))
         || value.productionBudget?.enabled !== true || !Number.isFinite(value.productionBudget.defaultDailyLimitCny) || value.productionBudget.defaultDailyLimitCny < 0
         || !Number.isFinite(value.productionBudget.totalDailyLimitCny) || value.productionBudget.totalDailyLimitCny <= 0
         || !Number.isFinite(config.maxBotDailyLimitCny) || config.maxBotDailyLimitCny <= 0 || value.productionBudget.totalDailyLimitCny > config.maxBotDailyLimitCny
         || !Number.isFinite(config.maxChatDailyLimitCny) || config.maxChatDailyLimitCny < 0 || value.productionBudget.defaultDailyLimitCny > config.maxChatDailyLimitCny) throw Error('Hosted model template requires explicit bounded funding policy');
+    if (value.platform !== undefined && (!exact(value.platform,['resourcesOnly']) || value.platform.resourcesOnly !== true)) throw Error('Hosted platform resource configuration invalid');
     let speechSource = null;
     if (value.speech) {
       if (!exact(value.speech, ['credentialFile', 'timeoutMs']) || !path.isAbsolute(value.speech.credentialFile || '') || !Number.isInteger(value.speech.timeoutMs) || value.speech.timeoutMs < 1000 || value.speech.timeoutMs > 60000) throw Error('Hosted speech configuration invalid');
@@ -297,7 +298,7 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
     if (!fs.existsSync(file)) write(file, {
       api: { apiKey: '', baseUrl: '', model: '', fallbackModels: [] }, providers: [], dshProviderKeys: {},
       ...template.settings,
-      platform: { enabled: false }, snowluma: { autoLaunch: false, dir: '/var/lib/snowluma', wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000', accessToken: row.onebot_token, httpAccessToken: row.onebot_token },
+      platform: { ...template.settings.platform, enabled: false }, snowluma: { autoLaunch: false, dir: '/var/lib/snowluma', wsUrl: 'ws://127.0.0.1:3001', httpUrl: 'http://127.0.0.1:3000', accessToken: row.onebot_token, httpAccessToken: row.onebot_token },
       server: { port: 3210, token: row.machine_token }, allow: { groups: [], private: [] },
       extensions: { hotReload: false }, ...(!config.modelTemplateFile ? { productionBudget: { enabled: true, funding: {} } } : {}), proactive: { enabled: false },
       tools: { enabled: true, crossChatSend: false, categories: { system: false } }
