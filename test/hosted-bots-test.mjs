@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createHostedBots } from '../src/hosted-bots.js';
 import { createHostedLoginClient, publicHostedLoginState } from '../src/hosted-login-client.js';
-import { createHostedQQAgentService, createDockerQQAgentRuntime, findHostedQQLoginWindow, hostedLoginWindowPng } from '../scripts/hosted-qqagent-service.mjs';
+import { createHostedQQAgentService, createDockerQQAgentRuntime, validateHostedQQAgentConfig, findHostedQQLoginWindow, hostedLoginWindowPng } from '../scripts/hosted-qqagent-service.mjs';
 
 const id = index => index.toString(16).padStart(32, '0');
 async function fixture(t, options = {}) {
@@ -21,8 +21,8 @@ async function fixture(t, options = {}) {
   let failStart = false, failStop = false, gate = null, starts = 0, stops = 0;
   const runtime = {
     capacity: async () => options.capacity !== false,
-    async start(row) { starts++; resources.add(row.request_id); await gate; if (failStart) throw Error('fixture start failure'); },
-    async inspect(row) { return live.get(row.request_id) || { qrImage: 'data:image/png;base64,AAAA' }; },
+    async start(row) { starts++; resources.add(row.request_id); await gate; if(options.isolationMismatch)throw Object.assign(Error('fixture isolation mismatch'),{code:'ISOLATION_MISMATCH'}); if (failStart) throw Error('fixture start failure'); },
+    async inspect(row) { if(options.isolationInspect)throw Object.assign(Error('fixture Agent isolation mismatch'),{code:'ISOLATION_MISMATCH'}); return live.get(row.request_id) || { qrImage: 'data:image/png;base64,AAAA' }; },
     async stop(row) { stops++; if (failStop) throw Error('fixture stop failure'); resources.delete(row.request_id); },
     async refresh(row) { live.delete(row.request_id); }
   };
@@ -244,16 +244,243 @@ test('Docker login capture emits only a visible fixed login window and rechecks 
   const runtime = createDockerQQAgentRuntime({ root, dockerBin: '/fixture/docker', dockerSocket: '/fixture/docker.sock', basePort: 20000 }, {
     exec: async (_file, args) => {
       commands.push(args);
+      if(args[2]==='inspect')return {stdout:JSON.stringify([{Name:'/qqagent-host-'+id(9),Config:{Labels:{'qq-agent.request':id(9),'qq-agent.owner':id(2)}},HostConfig:{NetworkMode:'none',Memory:640*1024**2,MemorySwap:640*1024**2,OomScoreAdj:1000},State:{Running:true}}])};
       if (args.includes('xwd')) return { stdout: frame };
       return { stdout: args.includes('-tree') ? '0x123 "QQ": ("qq" "QQ") 320x460+0+0 +20+30' : 'Map State: ' + (visible ? 'IsViewable' : 'IsUnMapped') };
     },
     fetchImpl: async () => { identityCalls++; return new Response(JSON.stringify({ status: 'ok', data: becameWrongAccount && identityCalls % 2 === 0 ? { user_id: '10002' } : {} })); }
   });
-  const row = { request_id: id(9), expected_qq: '10001', slot: 0, qr_at: Date.now(), onebot_token: 'fixture-only' };
+  const row = { request_id: id(9), owner_user_id:id(2), expected_qq: '10001', slot: 0, qr_at: Date.now(), onebot_token: 'fixture-only' };
   const image = await runtime.inspect(row); assert.ok(image.qrImage.startsWith('data:image/png;base64,'));
   assert.ok(commands.filter(args => args.includes('xwd')).every(args => args.includes('-id') && !args.includes('-root')));
   becameWrongAccount = true; identityCalls = 0;
   assert.deepEqual(await runtime.inspect(row), { actualQQ: '10002', online: false, agentReady: false });
   becameWrongAccount = false; visible = false;
   assert.deepEqual(await runtime.inspect(row), {});
+});
+
+test('hosted isolation rejects ancestor slices, cgroup injection and invalid swap without executing Docker', t => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-isolation-validation-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const base={root,secret:crypto.randomBytes(32).toString('base64url'),port:17000,basePort:20000,maxBots:1};
+  for(const containerCgroupParent of ['system.slice','user.slice','machine.slice','root.slice','/qqhosted.slice',
+    'system/qqhosted.slice','qq-hosted.slice','qqhosted.slice/child','qqhosted.slice --oom-kill-disable','qqhosted.slice\n','QQHosted.slice','',null]){
+    assert.throws(()=>validateHostedQQAgentConfig({...base,containerCgroupParent},{injectedRuntime:true}),/independent top-level slice/);
+    assert.throws(()=>createDockerQQAgentRuntime({...base,containerCgroupParent}),/independent top-level slice/);
+  }
+  for(const qqSwapMb of [-1,513,.5,'256',null,NaN,Infinity]){
+    assert.throws(()=>validateHostedQQAgentConfig({...base,qqSwapMb},{injectedRuntime:true}),/swap must be an integer/);
+    assert.throws(()=>createDockerQQAgentRuntime({...base,qqSwapMb}),/swap must be an integer/);
+  }
+  for(const qqMemory of ['640m;touch /tmp/fixture','-1m','640.5m','unbounded',Number.MAX_SAFE_INTEGER+'g'])
+    assert.throws(()=>createDockerQQAgentRuntime({...base,qqMemory,qqSwapMb:256}),/memory/);
+  for(const qqSwapMb of [0,1,256,512])
+    assert.ok(validateHostedQQAgentConfig({...base,containerCgroupParent:'qqhosted.slice',qqSwapMb},{injectedRuntime:true}));
+});
+
+async function capturedContainerArguments(t,overrides={},runtimeOptions={}){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-isolation-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const commands=[],stop=Error('fixture-stops-before-any-container-can-run');
+  const row={request_id:id(90),owner_user_id:id(2),expected_qq:'10001',slot:0,identity_index:0,onebot_token:'fixture-onebot',machine_token:'fixture-machine'};
+  const runtime=createDockerQQAgentRuntime({root,dockerBin:'/fixture/docker',dockerSocket:'/fixture/docker.sock',basePort:20000,
+    uidBase:process.getuid?.()??10000,gidBase:process.getgid?.()??10000,codeRoot:'/fixture/release',startScript:'/fixture/start.sh',
+    image:'fixture-qq@sha256:'+'a'.repeat(64),agentImage:'fixture-agent@sha256:'+'b'.repeat(64),...overrides},{
+    availableMemoryKb:()=>8*1024*1024,
+    exec:async(_file,args)=>{
+      if(args[2]==='inspect'){
+        if(args[3]==='qqagent-host-'+row.request_id&&commands.length){
+          const memory=overrides.qqMemory==='1g'?1024:overrides.qqMemory==='800m'?800:640;
+          return {stdout:JSON.stringify([{Name:'/qqagent-host-'+row.request_id,Config:{Labels:{'qq-agent.request':row.request_id,'qq-agent.owner':row.owner_user_id}},
+            HostConfig:{NetworkMode:'none',CgroupParent:overrides.containerCgroupParent||'',Memory:memory*1024**2,MemorySwap:(memory+(overrides.qqSwapMb||0))*1024**2,OomScoreAdj:1000},State:{Running:true}}])};
+        }
+        throw Object.assign(Error('fixture missing container'),{stderr:'Error: No such container'});
+      }
+      if(args[2]==='run'){commands.push(args);throw stop;}
+      assert.fail('Unexpected fake Docker command: '+args[2]);
+    },
+    spawnImpl:()=>assert.fail('Fixture never starts a network helper or container'),
+    fetchImpl:async url=>{
+      assert.ok(String(url).startsWith('http://127.0.0.1:20000/'));
+      return new Response(JSON.stringify({status:'ok',data:String(url).endsWith('/get_login_info')?{user_id:10001}:{online:true}}));
+    },...runtimeOptions
+  });
+  await assert.rejects(runtime.start(row),error=>error===stop);
+  await assert.rejects(runtime.inspect(row),error=>error===stop);
+  assert.equal(commands.length,2);
+  const argument=(args,flag)=>args[args.indexOf(flag)+1];
+  const qq=commands.find(args=>argument(args,'--name')==='qqagent-host-'+row.request_id);
+  const agent=commands.find(args=>argument(args,'--name')==='qqagent-host-'+row.request_id+'-agent');
+  assert.ok(qq&&agent);
+  return {qq,agent,argument};
+}
+
+test('both owned containers use a separate configured slice and maximum positive OOM score; QQ swap is total memory plus swap',async t=>{
+  const {qq,agent,argument}=await capturedContainerArguments(t,{containerCgroupParent:'qqhosted.slice',qqMemory:'640m',qqSwapMb:256});
+  for(const args of [qq,agent]){
+    assert.equal(argument(args,'--cgroup-parent'),'qqhosted.slice');
+    assert.equal(argument(args,'--oom-score-adj'),'1000');
+    assert.equal(args.includes('--oom-kill-disable'),false);
+    assert.equal(args.includes('--privileged'),false);
+  }
+  assert.equal(argument(qq,'--memory'),'640m');assert.equal(argument(qq,'--memory-swap'),'896m');
+  assert.equal(argument(agent,'--memory'),'192m');assert.equal(argument(agent,'--memory-swap'),'192m');
+});
+
+test('omitted isolation flags preserve previous memory/swap limits and add no cgroup ancestry',async t=>{
+  const {qq,agent,argument}=await capturedContainerArguments(t);
+  for(const args of [qq,agent]){
+    assert.equal(args.includes('--cgroup-parent'),false);
+    assert.equal(argument(args,'--oom-score-adj'),'1000');
+  }
+  assert.equal(argument(qq,'--memory'),'640m');assert.equal(argument(qq,'--memory-swap'),'640m');
+  assert.equal(argument(agent,'--memory'),'192m');assert.equal(argument(agent,'--memory-swap'),'192m');
+});
+
+test('QQ swap arithmetic respects a configured GiB limit while explicit zero leaves its literal Docker limit intact',async t=>{
+  const matched=await capturedContainerArguments(t,{qqMemory:'800m',qqSwapMb:256});
+  assert.equal(matched.argument(matched.qq,'--memory-swap'),'1056m');
+  const raised=await capturedContainerArguments(t,{qqMemory:'1g',qqSwapMb:512});
+  assert.equal(raised.argument(raised.qq,'--memory-swap'),'1536m');
+  const unchanged=await capturedContainerArguments(t,{qqMemory:'1g',qqSwapMb:0});
+  assert.equal(unchanged.argument(unchanged.qq,'--memory-swap'),'1g');
+});
+
+test('explicit host memory gates require nonnegative safe KiB integers; zero disables only the selected precheck',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-memory-gate-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const base={root,secret:crypto.randomBytes(32).toString('base64url'),port:17000,basePort:20000,maxBots:1};
+  for(const field of ['minAvailableMemoryKb','minAgentAvailableMemoryKb']){
+    for(const value of [-1,.5,'0','1',null,NaN,Infinity,2**40+1,Number.MAX_SAFE_INTEGER]){
+      const config={...base,[field]:value};
+      assert.throws(()=>validateHostedQQAgentConfig(config,{injectedRuntime:true}),/nonnegative safe integer/);
+      assert.throws(()=>createDockerQQAgentRuntime(config),/nonnegative safe integer/);
+      assert.throws(()=>createHostedQQAgentService(config,{runtime:{}}),/nonnegative safe integer/);
+    }
+    for(const value of [0,1,1024,1120000,2**40])assert.ok(validateHostedQQAgentConfig({...base,[field]:value},{injectedRuntime:true}));
+  }
+  let available=122;
+  const runtime=createDockerQQAgentRuntime({...base,minAvailableMemoryKb:123,minAgentAvailableMemoryKb:1},{availableMemoryKb:()=>available});
+  assert.equal(await runtime.capacity(),false);available=123;assert.equal(await runtime.capacity(),true);
+});
+
+test('zero host prechecks allow capacity and both synthetic starts even when meminfo is unavailable',async t=>{
+  let reads=0;
+  const noMemoryProbe=()=>{reads++;throw Error('fixture meminfo intentionally unavailable');};
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-zero-gate-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const disabled=createDockerQQAgentRuntime({root,minAvailableMemoryKb:0,minAgentAvailableMemoryKb:0},{availableMemoryKb:noMemoryProbe});
+  assert.equal(await disabled.capacity(),true);assert.equal(reads,0);
+  const {qq,agent}=await capturedContainerArguments(t,{minAvailableMemoryKb:0,minAgentAvailableMemoryKb:0},{availableMemoryKb:noMemoryProbe});
+  assert.ok(qq&&agent);assert.equal(reads,0,'Explicit zero never reads host memory for either container');
+  const defaults=createDockerQQAgentRuntime({root},{availableMemoryKb:noMemoryProbe});
+  assert.equal(await defaults.capacity(),false);assert.equal(reads,1,'Omission preserves the default host gate');
+});
+
+function existingContainerFixture(t){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-existing-isolation-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const row={request_id:id(91),owner_user_id:id(2),expected_qq:'10001',slot:0,identity_index:0,onebot_token:'fixture-onebot',machine_token:'fixture-machine'};
+  const qqName='qqagent-host-'+row.request_id,agentName=qqName+'-agent',commands=[];
+  const make=(agent=false)=>({Name:'/'+(agent?agentName:qqName),Config:{Labels:{'qq-agent.request':row.request_id,'qq-agent.owner':row.owner_user_id}},
+    HostConfig:{NetworkMode:agent?'container:'+qqName:'none',CgroupParent:'qqhosted.slice',Memory:(agent?192:800)*1024**2,MemorySwap:(agent?192:1056)*1024**2,OomScoreAdj:1000},State:{Running:true}});
+  const containers=new Map([[qqName,make()],[agentName,make(true)]]);
+  const runtime=createDockerQQAgentRuntime({root,dockerBin:'/fixture/docker',dockerSocket:'/fixture/docker.sock',basePort:20000,
+    containerCgroupParent:'qqhosted.slice',qqMemory:'800m',qqSwapMb:256},{
+    availableMemoryKb:()=>8*1024*1024,
+    exec:async(_file,args)=>{
+      commands.push(args);const action=args[2],name=args[3];
+      if(action==='inspect'){
+        if(!containers.has(name))throw Object.assign(Error('fixture missing'),{stderr:'No such container'});
+        return {stdout:JSON.stringify([containers.get(name)])};
+      }
+      if(action==='start'){containers.get(name).State.Running=true;return {stdout:name};}
+      if(action==='rm'){containers.delete(args.at(-1));return {stdout:''};}
+      assert.fail('Existing container must never be recreated: '+action);
+    },
+    spawnImpl:()=>assert.fail('No host helper can be started by this fixture'),
+    fetchImpl:async url=>new Response(JSON.stringify(String(url).endsWith('/api/hosted/identity')?
+      {ok:true,botId:'hosted-'+row.request_id,expectedQQ:row.expected_qq,actualQQ:row.expected_qq,qqOnline:true,agentReady:true}:
+      {status:'ok',data:String(url).endsWith('/get_login_info')?{user_id:10001}:{online:true}}))
+  });
+  return {root,row,qqName,agentName,containers,commands,runtime,make};
+}
+
+test('existing QQ/Agent HostConfig mismatches fail closed before restart, recreation or deletion',async t=>{
+  const f=existingContainerFixture(t);
+  for(const name of [f.qqName,f.agentName])for(const [field,bad] of [['CgroupParent','system.slice'],['Memory',0],['MemorySwap',-1],['OomScoreAdj',0]]){
+    f.containers.set(f.qqName,f.make());f.containers.set(f.agentName,f.make(true));
+    f.containers.get(name).HostConfig[field]=bad;
+    f.commands.length=0;
+    await assert.rejects(f.runtime.inspect(f.row),error=>error.code==='ISOLATION_MISMATCH'&&error.message.includes(field));
+    if(name===f.qqName)await assert.rejects(f.runtime.start(f.row),{code:'ISOLATION_MISMATCH'});
+    assert.equal(f.commands.some(args=>['run','start','rm'].includes(args[2])),false);
+    assert.equal(f.containers.size,2);
+  }
+});
+
+test('matching existing isolation is retained and a stopped matching Agent can resume without rebuilding or deleting data',async t=>{
+  const f=existingContainerFixture(t),preserved=path.join(f.root,'preserved-login-state');fs.writeFileSync(preserved,'fixture-login-retained');
+  assert.deepEqual(await f.runtime.inspect(f.row),{actualQQ:'10001',online:true,agentReady:true});
+  assert.equal(f.commands.some(args=>['run','start','rm'].includes(args[2])),false);
+  f.containers.get(f.agentName).State.Running=false;f.commands.length=0;
+  assert.deepEqual(await f.runtime.inspect(f.row),{actualQQ:'10001',online:true,agentReady:true});
+  assert.deepEqual(f.commands.filter(args=>args[2]==='start').map(args=>args[3]),[f.agentName]);
+  assert.equal(f.commands.some(args=>['run','rm'].includes(args[2])),false);
+  assert.equal(fs.readFileSync(preserved,'utf8'),'fixture-login-retained');
+});
+
+test('explicit cancellation can remove owned mismatching containers but preflights every label and preserves login data',async t=>{
+  const f=existingContainerFixture(t),preserved=path.join(f.root,'preserved-login-state');fs.writeFileSync(preserved,'fixture-login-retained');
+  f.containers.get(f.qqName).HostConfig.CgroupParent='system.slice';
+  f.containers.get(f.agentName).Config.Labels['qq-agent.owner']=id(3);
+  await assert.rejects(f.runtime.stop(f.row),{code:'CONFLICT'});
+  assert.equal(f.commands.some(args=>args[2]==='rm'),false,'A foreign label blocks the whole cleanup before either removal');
+  f.containers.get(f.agentName).Config.Labels['qq-agent.owner']=f.row.owner_user_id;
+  await f.runtime.stop(f.row);
+  assert.equal(f.containers.size,0);
+  assert.deepEqual(f.commands.filter(args=>args[2]==='rm').map(args=>args.at(-1)),[f.agentName,f.qqName]);
+  assert.equal(fs.readFileSync(preserved,'utf8'),'fixture-login-retained');
+});
+
+test('broker preserves a failed isolation reservation until explicit cancel, then supports a fresh reconnect',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'qq-agent-hosted-isolation-recovery-'));
+  let mismatch=true,stops=0;
+  const runtime={async start(){if(mismatch)throw Object.assign(Error('fixture HostConfig mismatch'),{code:'ISOLATION_MISMATCH'});},
+    async inspect(){return {qrImage:'data:image/png;base64,AAAA'};},async stop(){stops++;},async capacity(){return true;}};
+  const service=createHostedQQAgentService({root,secret:crypto.randomBytes(32).toString('base64url'),port:17000,basePort:20000,maxBots:1,cooldownMs:0},{runtime});
+  t.after(async()=>{await service.close();fs.rmSync(root,{recursive:true,force:true});});
+  const input={requestId:id(92),ownerUserId:id(2),expectedQQ:'10001',slot:0,version:1};
+  assert.equal((await service.operation('start',input)).login.state,'failed');
+  assert.equal(stops,0);
+  const db=new DatabaseSync(path.join(root,'hosted-runtime.sqlite'),{readOnly:true});
+  assert.deepEqual({...db.prepare('SELECT state,reserved FROM runtime_instances').get()},{state:'failed',reserved:1});
+  db.close();await service.recover();assert.equal(stops,0);
+  assert.equal((await service.operation('status',input)).login.state,'failed');
+  assert.equal((await service.operation('cancel',{...input,version:2})).login.state,'stopped');assert.equal(stops,1);
+  mismatch=false;
+  assert.equal((await service.operation('reconnect',{...input,version:3})).login.state,'waiting_scan');
+});
+
+test('real broker client and manager retain isolation-failed instances instead of compensating them with cancel',async t=>{
+  const options={isolationMismatch:true},f=await fixture(t,options),row=f.manager.create(f.alice,{expectedQQ:'10001'});
+  const failed=await f.manager.start(f.alice,{requestId:row.id,version:row.version});
+  assert.equal(failed.login.state,'failed');assert.equal(failed.request.status,'failed');
+  assert.equal(f.stops,0);assert.equal(f.resources.has(row.id),true);
+  assert.equal(f.manager.overview(f.alice).capacity.available,1);
+  await f.service.recover();assert.equal(f.stops,0);
+  assert.equal((await f.manager.status(f.alice,{requestId:row.id})).login.state,'failed');
+  assert.equal((await f.manager.cancel(f.alice,{requestId:row.id})).login.state,'stopped');
+  assert.equal(f.stops,1);assert.equal(f.resources.has(row.id),false);
+  options.isolationMismatch=false;
+  assert.equal((await f.manager.reconnect(f.alice,{requestId:row.id})).login.state,'waiting_scan');
+});
+
+test('an Agent isolation failure discovered after QQ startup also returns failed without upstream cancellation',async t=>{
+  const options={isolationInspect:true},f=await fixture(t,options),row=f.manager.create(f.alice,{expectedQQ:'10001'});
+  assert.equal((await f.manager.start(f.alice,{requestId:row.id})).login.state,'failed');
+  assert.equal(f.stops,0);assert.equal(f.resources.has(row.id),true);
+  assert.equal((await f.manager.status(f.alice,{requestId:row.id})).login.state,'failed');
+  assert.equal(f.stops,0);
+  await f.manager.cancel(f.alice,{requestId:row.id});assert.equal(f.stops,1);
 });

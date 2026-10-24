@@ -18,12 +18,44 @@ const qq = value => typeof value === 'string' && /^[1-9]\d{4,14}$/.test(value) &
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join() === [...keys].sort().join();
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const APP_ID = 0x51504853;
+function dockerMemoryBytes(value) {
+  const match=typeof value==='string'&&/^([1-9]\d*)([bkmg](?:b)?)?$/i.exec(value);
+  if(!match)throw Error('Hosted memory must have an integer Docker memory size');
+  const bytes=Number(match[1])*({b:1,k:1024,m:1024**2,g:1024**3}[(match[2]||'b')[0].toLowerCase()]);
+  if(!Number.isSafeInteger(bytes)||bytes<=0)throw Error('Hosted memory is out of range');
+  return bytes;
+}
+
+function hostedIsolation(config) {
+  const parent=config.containerCgroupParent,swap=config.qqSwapMb??0;
+  // Hyphens and paths encode systemd slice ancestry, so accept only a new
+  // top-level slice. Never place owned clients in an existing service ancestor.
+  if(parent!==undefined&&(typeof parent!=='string'||!/^[a-z0-9]+\.slice$/.test(parent)
+      ||parent.length>64||['system.slice','user.slice','machine.slice','root.slice'].includes(parent)))
+    throw Error('Hosted cgroup parent must be an independent top-level slice');
+  if(config.qqSwapMb!==undefined&&(!Number.isInteger(config.qqSwapMb)||config.qqSwapMb<0||config.qqSwapMb>512))
+    throw Error('Hosted QQ swap must be an integer between 0 and 512 MiB');
+  for(const field of ['minAvailableMemoryKb','minAgentAvailableMemoryKb'])
+    if(config[field]!==undefined&&(!Number.isSafeInteger(config[field])||config[field]<0||config[field]>2**40))
+      throw Error('Hosted '+field+' must be a nonnegative safe integer up to 2^40 KiB');
+  const qqMemory=dockerMemoryBytes(config.qqMemory||'640m'),agentMemory=dockerMemoryBytes(config.agentMemory||'192m');
+  let memorySwap=config.qqMemory||'640m';
+  if(swap){
+    const total=qqMemory+swap*1024**2;
+    if(!Number.isSafeInteger(total))throw Error('Hosted QQ memory plus swap is out of range');
+    memorySwap=total%(1024**2)===0?total/(1024**2)+'m':String(total);
+  }
+  return {parent:parent===undefined?[]:['--cgroup-parent',parent],memorySwap,
+    qq:{Memory:qqMemory,MemorySwap:dockerMemoryBytes(memorySwap),OomScoreAdj:1000},
+    agent:{Memory:agentMemory,MemorySwap:agentMemory,OomScoreAdj:1000}};
+}
 
 export function validateHostedQQAgentConfig(config, { injectedRuntime = false } = {}) {
   if (!config || !path.isAbsolute(config.root || '') || !/^[A-Za-z0-9_-]{32,128}$/.test(config.secret || '')
       || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
       || !Number.isInteger(config.maxBots) || config.maxBots < 1 || config.maxBots > 16
       || !Number.isInteger(config.basePort) || config.basePort < 10000 || config.basePort + config.maxBots * 10 > 65535) throw Error('Invalid private hosted QQ service configuration');
+  hostedIsolation(config);
   if (!injectedRuntime) {
     for (const key of ['codeRoot', 'dockerBin', 'dockerSocket', 'startScript', 'slirpBin', 'slirpLib', 'nsenterBin', 'ipBin']) if (!path.isAbsolute(config[key] || '')) throw Error('Invalid hosted runtime path: ' + key);
     for (const key of ['image', 'agentImage']) if (!/^\S+@sha256:[a-f0-9]{64}$/.test(config[key] || '')) throw Error('Hosted container images must be pinned by digest');
@@ -119,7 +151,16 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
           }
           db.prepare('UPDATE runtime_instances SET version=? WHERE request_id=?').run(input.version, row.request_id);
           try { await runtime.start(row); }
-          catch (error) { try { await stop(row); } catch { saveState(row, 'cleanup_pending'); } throw error; }
+          catch (error) {
+            if(error.code==='ISOLATION_MISMATCH'){
+              saveState(row,'failed');
+              // Return a failed workflow state rather than a transport error:
+              // callers compensate HTTP failures by cancelling the instance.
+              return {ok:true,login:{state:'failed'},connection:connection(row)};
+            }
+            else try { await stop(row); } catch { saveState(row, 'cleanup_pending'); }
+            throw error;
+          }
         } finally { creating = false; }
       } else db.prepare('UPDATE runtime_instances SET version=? WHERE request_id=?').run(input.version, row.request_id);
       if (action === 'cancel') { await stop(row); return { ok: true, login: { state: 'stopped' } }; }
@@ -133,6 +174,12 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
         }
       }
       return { ok: true, login: await inspect(row), connection: connection(row) };
+    } catch(error) {
+      // The QQ may match while a restored Agent is in the wrong slice. Cover
+      // inspection/status failures too, so an upstream compensating cancel does
+      // not delete either owned container on an isolation validation failure.
+      if(error.code==='ISOLATION_MISMATCH'&&row){saveState(row,'failed');return {ok:true,login:{state:'failed'},connection:connection(row)};}
+      throw error;
     } finally { locks.delete(input.requestId); }
   }
   async function recover() {
@@ -143,7 +190,7 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
       try {
         if (row.state === 'cleanup_pending') await stop(row);
         else if (row.state !== 'mismatch') { await runtime.start(row); await inspect(row); }
-      } catch { /* Retain reservation and report actual status on the next poll. */ }
+      } catch(error) { if(error.code==='ISOLATION_MISMATCH')saveState(row,'failed'); /* Keep the reservation and data. */ }
       finally { locks.delete(row.request_id); }
     }
   }
@@ -160,7 +207,7 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
       let input; try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail('INVALID'); }
       send(200, await operation(req.url.split('/').at(-1), input));
     } catch (error) {
-      const codes = { INVALID: 400, CONFLICT: 409, CAPACITY: 429, RESOURCE: 503, MISSING: 404, BUSY: 503 };
+      const codes = { INVALID: 400, CONFLICT: 409, ISOLATION_MISMATCH:503, CAPACITY: 429, RESOURCE: 503, MISSING: 404, BUSY: 503 };
       send(codes[error.code] || 503, { ok: false, code: Object.hasOwn(codes, error.code) ? error.code : 'BUSY' });
     }
   });
@@ -178,7 +225,7 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
             const login = await inspect(row);
             if (['starting', 'waiting_scan', 'expired'].includes(login.state) && now() - row.started_at >= (config.loginIdleMs ?? 600000)) await stop(row);
           }
-        } catch {} finally { locks.delete(row.request_id); }
+        } catch(error) {if(error.code==='ISOLATION_MISMATCH')saveState(row,'failed');} finally { locks.delete(row.request_id); }
       }
     } finally { janitorRunning = false; }
   }
@@ -188,13 +235,15 @@ export function createHostedQQAgentService(config, { runtime: injectedRuntime, n
   };
 }
 
-export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl = fetch, exec = execFile, spawnImpl = spawn } = {}) {
+export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl = fetch, exec = execFile, spawnImpl = spawn,
+  availableMemoryKb = () => { try { return Number(/^MemAvailable:\s+(\d+)/m.exec(fs.readFileSync('/proc/meminfo','utf8'))?.[1]); } catch { return null; } } } = {}) {
+  const isolation=hostedIsolation(config);
   const root = path.resolve(config.root), network = path.join(root, 'network');
   fs.mkdirSync(network, { recursive: true, mode: 0o700 });
   const docker = (args, options = {}) => exec(config.dockerBin, ['--host', 'unix://' + config.dockerSocket, ...args], { timeout: 20000, maxBuffer: 12 * 1024 * 1024, ...options });
   const directory = row => path.join(root, row.request_id), name = row => 'qqagent-host-' + row.request_id, agentName = row => name(row) + '-agent';
   const port = (row, offset) => config.basePort + row.slot * 10 + offset;
-  const hasMemory = minimum => { try { return Number(/^MemAvailable:\s+(\d+)/m.exec(fs.readFileSync('/proc/meminfo', 'utf8'))?.[1]) >= minimum; } catch { return false; } };
+  const hasMemory = minimum => { if(minimum===0)return true;try { const value=availableMemoryKb();return Number.isSafeInteger(value)&&value>=0&&value>=minimum; } catch { return false; } };
   const labels = row => ['--label', 'qq-agent.request=' + row.request_id, '--label', 'qq-agent.owner=' + row.owner_user_id];
   function modelTemplate() {
     if (!config.modelTemplateFile) return { settings: {}, speechSource: null };
@@ -246,12 +295,18 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
     const temp = file + '.new'; fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(temp, file);
     if (uid !== undefined) fs.chownSync(file, uid, gid);
   }
-  async function info(row, agent = false) {
+  async function info(row, agent = false, {validateIsolation=true}={}) {
     const expected = agent ? agentName(row) : name(row);
     try {
       const { stdout } = await docker(['inspect', expected]), value = JSON.parse(stdout)[0];
-      if (value.Name !== '/' + expected || value.Config?.Labels?.['qq-agent.request'] !== row.request_id || value.Config?.Labels?.['qq-agent.owner'] !== row.owner_user_id
-          || !agent && value.HostConfig?.NetworkMode !== 'none') throw fail('CONFLICT');
+      if (value.Name !== '/' + expected || value.Config?.Labels?.['qq-agent.request'] !== row.request_id || value.Config?.Labels?.['qq-agent.owner'] !== row.owner_user_id) throw fail('CONFLICT');
+      if(validateIsolation){
+        const wanted=agent?isolation.agent:isolation.qq,actual=value.HostConfig;
+        const mismatch=Object.keys(wanted).filter(field=>actual?.[field]!==wanted[field]);
+        if(config.containerCgroupParent!==undefined&&actual?.CgroupParent!==config.containerCgroupParent)mismatch.push('CgroupParent');
+        if(!agent&&actual?.NetworkMode!=='none')mismatch.push('NetworkMode');
+        if(mismatch.length)throw Object.assign(fail('ISOLATION_MISMATCH'),{message:'Hosted '+(agent?'Agent':'QQ')+' container isolation differs: '+mismatch.join(', ')});
+      }
       return value;
     } catch (error) { if (error.code === 'CONFLICT') throw error; if (/No such (object|container)/i.test(error.stderr || '')) return null; throw error; }
   }
@@ -307,10 +362,11 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
   }
   async function startAgent(row) {
     let container = await info(row, true);
-    if (!container?.State.Running && !hasMemory(config.minAgentAvailableMemoryKb || 458752)) throw fail('RESOURCE');
+    if (!container?.State.Running && !hasMemory(config.minAgentAvailableMemoryKb ?? 458752)) throw fail('RESOURCE');
     if (!container) {
       const uid = config.uidBase + row.identity_index, gid = config.gidBase + row.identity_index;
       await docker(['run', '-d', '--name', agentName(row), ...labels(row), '--network', 'container:' + name(row), '--user', uid + ':' + gid,
+        ...isolation.parent,'--oom-score-adj','1000',
         '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--memory', config.agentMemory || '192m', '--memory-swap', config.agentMemory || '192m', '--cpus', '0.5', '--pids-limit', '128',
         '--log-opt', 'max-size=8m', '--log-opt', 'max-file=2', '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
         '--mount', 'type=bind,src=' + config.codeRoot + ',dst=/opt/qq-agent,readonly', '--mount', 'type=bind,src=' + path.join(directory(row), 'agent') + ',dst=/var/lib/qq-agent',
@@ -320,9 +376,12 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
         '-e', 'QQ_AGENT_HOSTED_BOT_ID=hosted-' + row.request_id, '-e', 'QQ_AGENT_HOSTED_EXPECTED_QQ=' + row.expected_qq, '-e', 'NODE_OPTIONS=--max-old-space-size=128',
         '--workdir', '/var/lib/qq-agent', config.agentImage, 'node', '/opt/qq-agent/src/server.js'], { timeout: 45000 });
       container = await info(row, true);
-    } else if (!container.State.Running) await docker(['start', agentName(row)]);
+    } else if (!container.State.Running) { await docker(['start', agentName(row)]);container=await info(row,true); }
+    if(!container?.State.Running)throw fail('RESOURCE');
   }
   async function inspect(row) {
+    const container=await info(row);
+    if(!container?.State.Running)return {};
     const login = await gateway(row, 'get_login_info');
     if (Number(login?.user_id) > 0) {
       const actualQQ = String(login.user_id);
@@ -353,15 +412,16 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
     } catch { return {}; }
   }
   return {
-    async capacity() { return hasMemory(config.minAvailableMemoryKb || 1120000); },
+    async capacity() { return hasMemory(config.minAvailableMemoryKb ?? 1120000); },
     async start(row) {
       let container = await info(row);
-      if (!container?.State.Running && !hasMemory(config.minAvailableMemoryKb || 1120000)) throw fail('RESOURCE');
+      if (!container?.State.Running && !hasMemory(config.minAvailableMemoryKb ?? 1120000)) throw fail('RESOURCE');
       setup(row);
       if (!container) {
         const base = directory(row);
         await docker(['run', '-d', '--name', name(row), ...labels(row), '--network', 'none', '--cap-add', 'SYS_PTRACE', '--security-opt', 'seccomp=unconfined',
-          '--memory', config.qqMemory || '640m', '--memory-swap', config.qqMemory || '640m', '--shm-size', '256m', '--cpus', '0.8', '--pids-limit', '256', '--ulimit', 'nofile=65536:65536',
+          ...isolation.parent,'--oom-score-adj','1000',
+          '--memory', config.qqMemory || '640m', '--memory-swap', isolation.memorySwap, '--shm-size', '256m', '--cpus', '0.8', '--pids-limit', '256', '--ulimit', 'nofile=65536:65536',
           '--log-opt', 'max-size=8m', '--log-opt', 'max-file=2', '-e', 'SNOWLUMA_ONEBOT_HOST=0.0.0.0', '-e', 'SNOWLUMA_WEBUI_HOST=0.0.0.0', '-e', 'SNOWLUMA_SCREEN=1024x768x24',
           '--mount', 'type=bind,src=' + path.join(base, 'qq-config') + ',dst=/app/.config', '--mount', 'type=bind,src=' + path.join(base, 'qq-local') + ',dst=/app/.local/share',
           '--mount', 'type=bind,src=' + path.join(base, 'snowluma') + ',dst=/app/data', '--mount', 'type=bind,src=' + config.startScript + ',dst=/root/start.sh,readonly', config.image], { timeout: 45000 });
@@ -373,9 +433,10 @@ export function createDockerQQAgentRuntime(config, { now = Date.now, fetchImpl =
     inspect,
     async stop(row) {
       // Remove the Agent first: no stale sender survives a namespace restart.
-      for (const agent of [true, false]) {
-        const container = await info(row, agent); if (!container) continue;
-        await docker(['rm', '-f', agent ? agentName(row) : name(row)], { timeout: 20000 });
+      const owned=await Promise.all([true,false].map(agent=>info(row,agent,{validateIsolation:false})));
+      for (const [index,container] of owned.entries()) {
+        if (!container) continue;
+        await docker(['rm', '-f', index===0?agentName(row):name(row)], { timeout: 20000 });
       }
       await stopNetwork(row);
     },

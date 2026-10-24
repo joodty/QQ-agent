@@ -46,12 +46,29 @@ scanning a QQ account does not authorize a paid call. The app integration must
 implement the instance total budget, strict expected-QQ checks on receive/send,
 and GET /api/hosted/identity before a worker can report ready.
 
-The default admission threshold requires at least 1,120,000 KiB of available
-memory before creating or restarting QQ (640 MiB QQ, 192 MiB Agent plus reserve).
-Agent creation independently requires 458,752 KiB. A smaller host returns
-RESOURCE and preserves current services; no extra real QQ login is attempted to
-prove capacity. A slot count is not a capacity benchmark. Measure the selected
-image and workload before increasing maxBots or lowering memory limits.
+The example explicitly sets both admission thresholds to zero, disabling the
+host available-memory preflight for QQ and Agent. This lets the owner start a
+second QQ without being blocked by a forecast. Container resource caps still
+apply. An omitted threshold retains the older conservative default of
+1,120,000 KiB for QQ or 458,752 KiB for Agent. Nonzero values must be positive
+integer KiB values; negative, fractional or string values are rejected. A failed
+preflight only means a configured threshold was not met, not that two QQ clients
+have been shown to exhaust memory. A slot count is not a capacity benchmark.
+
+The deployment example explicitly selects QQ memory 800 MiB and additional swap
+256 MiB: Docker's combined memory-swap argument is 1056 MiB. The Agent uses
+192 MiB and no swap. Omitted fields retain the older 640 MiB QQ/no-swap defaults.
+Install qqhosted.slice.example as a separate top-level qqhosted.slice and start
+it before this broker; require it in the broker's systemd dependencies when
+using this config. Verify memory.high=896 MiB, memory.max=1024 MiB,
+memory.swap.max=256 MiB and CPU quota=50% on the actual cgroup. This shared pool
+is sized for maxBots=1; more slots need a new capacity assessment. Do not reuse
+the primary QQ service's slice. Both new containers use oom-score-adj=1000 so
+the kernel preferentially sacrifices these disposable workers under host OOM.
+This is protection, not a guarantee that a busy host cannot run out of memory.
+Restoring an existing container verifies its memory, swap, OOM priority and
+configured parent; a mismatch fails closed and retains its data/reservation
+for explicit operator cleanup rather than silently accepting older isolation.
 
 The platform stores request ID, owner, expected QQ, reserved slot, state and
 version in its own hosted SQL file. Every browser operation rechecks the current

@@ -1,0 +1,12 @@
+[Unit]
+Description=Isolated resource pool for owned QQ Agent instances
+
+[Slice]
+MemoryAccounting=yes
+MemoryHigh=896M
+MemoryMax=1024M
+MemorySwapMax=256M
+CPUAccounting=yes
+CPUQuota=50%
+TasksAccounting=yes
+TasksMax=512

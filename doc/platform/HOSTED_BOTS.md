@@ -39,7 +39,7 @@ QQ Agent 的 data、HOME、密钥、端口、费用账本和 OS UID 均独立；
 
 示例为实例每日 3 元、单聊天每日 1.5 元、语音另限每日 0.3 元，属于服务器资助上限。偏好覆盖不会暴露供应商密钥或增加资助权限。已有费用的旧账本不能直接启用新总额账本而忽略历史费用；已启用的总额配置也不能被直接移除。
 
-默认容量检查需要至少 1,120,000 KiB 可用内存，再启动一个 QQ；人数名额与实际内存分别检查。资源不足明确拒绝新实例。部署模板和依赖说明见 [broker 部署说明](../../scripts/deploy/HOSTED_QQAGENT.md)。平台设置 `QQ_AGENT_HOSTED_CLIENT_CONFIG` 指向私有客户端 JSON（baseUrl、secret、maxBots），公开代理只开放账号平台接口，不开放 broker 或 worker 端口。
+两个 `min*AvailableMemoryKb` 字段显式设为0时关闭启动前可用内存检查，让本人直接发起接入；仍保留新容器自身的内存与CPU上限、独立资源池及一个托管名额，不因预测值拦截启动。用户于2026-10-24明确要求取消该预检，部署示例已采用0。字段省略时保留旧默认门槛（QQ 1,120,000 KiB、Agent 458,752 KiB），未达到门槛并不代表已实测无法双开。部署模板和依赖说明见 [broker 部署说明](../../scripts/deploy/HOSTED_QQAGENT.md)。平台设置 `QQ_AGENT_HOSTED_CLIENT_CONFIG` 指向私有客户端 JSON（baseUrl、secret、maxBots），公开代理只开放账号平台接口，不开放 broker 或 worker 端口。
 
 ## 模型服务切换暂停
 
