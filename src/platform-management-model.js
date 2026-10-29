@@ -6,6 +6,7 @@ import {validateProductionBudgetConfig} from './paid-call-guard.js';
 import {resolveApiKey} from './llm.js';
 import {thinkingEffortOptions} from './thinking.js';
 import {COMMANDCODE_GO_MODELS,COMMANDCODE_GO_USD_TO_CNY} from './commandcode-go-models.js';
+import {FREE_MODEL} from './verified-free-model.js';
 const fail=(message,statusCode=400)=>Object.assign(Error(message),{statusCode});
 const plain=x=>x&&typeof x==='object'&&!Array.isArray(x);
 const endpoint=x=>{if(typeof x!=='string'||x.length>2048)throw fail('请选择平台批准的模型服务');let url;try{url=new URL(x);}catch{throw fail('请选择平台批准的模型服务');}if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw fail('模型服务必须是批准的HTTPS地址');return url.href.replace(/\/+$/,'');};
@@ -13,8 +14,8 @@ const version=cfg=>crypto.createHash('sha256').update(JSON.stringify({goCatalogu
 function goCatalogue(){
  return COMMANDCODE_GO_MODELS.map(row=>{
   const quote=row.usd,complete=quote&&['input','output','cacheRead','cacheWrite'].every(key=>typeof quote[key]==='number'&&Number.isFinite(quote[key])&&quote[key]>=0);
-  const disabledReason=row.disabledReason||(!complete?'官方报价资料不完整':quote.cacheWrite>0?'缓存写入费用尚未纳入当前费用保护':quote.input===0&&quote.output===0?'免费模型的报价验证尚未接入':null);
-  return {endpoint:'https://api.commandcode.ai/alpha',model:row.id,name:row.name,verified:row.verified===true,disabledReason,contextLength:row.contextLength,
+  const disabledReason=(row.id===FREE_MODEL?null:row.disabledReason)||(!complete?'官方报价资料不完整':quote.cacheWrite>0?'缓存写入费用尚未纳入当前费用保护':quote.input===0&&quote.output===0&&row.id!==FREE_MODEL?'免费模型的报价验证尚未接入':null);
+  return {endpoint:'https://api.commandcode.ai/alpha',model:row.id,name:row.name,verified:row.verified===true||row.id===FREE_MODEL,disabledReason,contextLength:row.contextLength,
    ...(complete?{prices:{inputCnyPerMillion:quote.input*COMMANDCODE_GO_USD_TO_CNY,outputCnyPerMillion:quote.output*COMMANDCODE_GO_USD_TO_CNY,cacheHitCnyPerMillion:quote.cacheRead*COMMANDCODE_GO_USD_TO_CNY,reasoningIncluded:true}}:{}),
    responseModels:[row.id.split('/').at(-1),...(row.aliases||[])],imageTokensPerImage:1024};
  });

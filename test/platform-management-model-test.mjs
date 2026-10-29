@@ -27,7 +27,7 @@ test('Go exposes the full official catalogue, preserves existing quotes, and den
  setRuntimeConfig({...cfg,api:{...cfg.api,baseUrl:base,model:'deepseek/deepseek-v4.1-flash',provider:'',apiKey:'fixture-go-catalogue-key'},productionBudget:{...cfg.productionBudget,endpoint:base,model:'deepseek/deepseek-v4.1-flash',approvedProviders:[]}});
  const view=f.service.get(f.admin),go=view.providers.filter(row=>row.endpoint===base);
  assert.equal(go.length,57);assert.ok(go.every(row=>row.name&&typeof row.verified==='boolean'));
- assert.equal(go.filter(row=>row.verified).length,2);
+ assert.equal(go.filter(row=>row.verified).length,3);
  assert.deepEqual(go.find(row=>row.model===view.model).prices,prices);
  const inactive=go.find(row=>row.disabledReason);assert.ok(inactive);
  assert.throws(()=>f.service.update(f.admin,{expectedVersion:view.version,endpoint:base,model:inactive.model,thinkingEffort:''}),e=>e.statusCode===400&&e.message===inactive.disabledReason);

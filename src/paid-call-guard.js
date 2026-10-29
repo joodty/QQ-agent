@@ -6,6 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { getConfig, updateConfig, DATA_DIR } from './config.js';
 import { createConversationBudget } from './conversation-budget.js';
 import { currentConversationContext, runWithConversationContext } from './conversation-context.js';
+import { verifiedFreeQuote } from './verified-free-model.js';
+import { createFreeCallAudit } from './free-call-audit.js';
 
 const APP_ID = 0x51425047, SCHEMA = 1, MICRO = 1_000_000;
 const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x) && [Object.prototype, null].includes(Object.getPrototypeOf(x));
@@ -39,7 +41,9 @@ function sourceFor(config, key) {
   if (!source || !chatKey(key) || Array.isArray(denied) && denied.map(String).includes(id) || !allowed(config,key) && source.scopeAuthorized !== true) throw error('聊天或出资未获明确授权');
   if (!['platform','trial','byok'].includes(source.mode) || typeof source.id !== 'string' || !Number.isSafeInteger(source.version) || source.version < 1 || typeof source.model !== 'string'
     || !plain(source.prices) || !['inputCnyPerMillion','cacheHitCnyPerMillion','outputCnyPerMillion'].every(k => money(source.prices[k])) || source.prices.reasoningIncluded !== true) throw error('出资没有完整报价');
-  return { ...source,endpoint:endpoint(source.endpoint) };
+  const normalized={...source,endpoint:endpoint(source.endpoint)};
+  if (!source.prices.inputCnyPerMillion && !source.prices.outputCnyPerMillion && !verifiedFreeQuote(normalized)) throw error('零报价不属于已验证免费模型');
+  return normalized;
 }
 export function resolvePaidConversationApi(baseApi, { explicitOverride = false } = {}) {
   const context = currentConversationContext();
@@ -82,7 +86,7 @@ function policy(config) {
     || p.imageTokensPerImage !== undefined && p.imageTokensPerImage !== 1024
     || p.platformSuspended !== undefined && typeof p.platformSuspended!=='boolean'
     || p.totalDailyLimitCny !== undefined && !money(p.totalDailyLimitCny)) throw error('生产费用保护未就绪或缺少完整人民币报价');
-  if (!p.prices.inputCnyPerMillion && !p.prices.outputCnyPerMillion) throw error('不能用缺失的零报价开放付费调用');
+  if (!p.prices.inputCnyPerMillion && !p.prices.outputCnyPerMillion && !verifiedFreeQuote({...p,endpoint:endpoint(p.endpoint)})) throw error('不能用缺失的零报价开放付费调用');
   for (const [key, limit] of Object.entries(p.overrides)) if (!chatKey(key) || !money(limit)) throw error('会话预算覆盖配置无效');
   for (const [key, f] of Object.entries(p.funding)) if (!chatKey(key) || !plain(f) || typeof f.mode !== 'string' || typeof f.enabled !== 'boolean') throw error('会话出资策略无效');
   for (const [date, rows] of Object.entries(p.initialSpent)) {
@@ -185,6 +189,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
   if (!storage || typeof config !== 'function') throw error('费用保护缺少依赖');
   let seedAt = null;
   const budget = createConversationBudget({ storage, file: 'conversation-budget', botId: 'primary', now: () => seedAt ?? now() });
+  const freeCalls = createFreeCallAudit(storage, now);
   let trialBudget=null, totalBudget=null;
   // Optional per-instance ceiling, shared by every conversation, model retry,
   // tool round and speech synthesis. All reservations use this same transaction.
@@ -264,7 +269,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
   });
   return {
     status(key) { return storage.transaction(() => { sync(effectivePolicy(config())); return budget.status(key); }); },
-    records: filters => budget.records(filters),
+    records: filters => [...budget.records(filters),...freeCalls.records(filters)].sort((a,b)=>a.createdAt-b.createdAt),
     trialStatus(){return storage.transaction(()=>trial(effectivePolicy(config())).status('private:1'));},
     totalStatus(){return storage.transaction(()=>total(effectivePolicy(config()))?.status('private:1')||null);},
     prepare({ api, body, purpose = 'chat', direct = true, platformCredential, operationId = crypto.randomUUID() }) {
@@ -273,6 +278,15 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         const credential = p.source.mode === 'byok' ? p.source.apiKey : platformCredential;
         if (endpoint(api.baseUrl) !== p.endpoint || api.model !== p.model || !credential || api.apiKey !== credential) throw error('当前端点、模型或凭据不在出资授权内');
         if (!['chat', 'memory', 'proactive'].includes(purpose)) throw error('未知付费调用用途');
+        if (verifiedFreeQuote(p)) {
+          const quote=constrainedBody(body,p,false),key=context.conversationKey;
+          const hold=freeCalls.reserve(key,operationId);
+          const raw=storage.readText('call-attribution'),rows=raw===null?{}:JSON.parse(raw);
+          rows[hold.id]={key,mode:p.source.mode,ownerId:p.source.ownerId||null,credentialRef:p.source.credentialRef||null,model:p.model,verifiedFree:true};
+          storage.writeText('call-attribution',JSON.stringify(rows),raw);
+          return {id:hold.id,free:true,key,requestId:context.requestId,model:p.model,endpoint:p.endpoint,sourceId:p.source.id,sourceVersion:p.source.version,
+            prices:{...p.prices},responseModels:[],body:quote.body,degraded:false,purpose,configFingerprint:fundingFingerprint(p,key)};
+        }
         const current = budget.status(context.conversationKey), first = constrainedBody(body, p, false), globalTrial=p.source.mode==='trial'?trial(p):null,globalTotal=total(p);
         const globalChecks=[globalTrial,globalTotal].filter(Boolean).map(ledger=>ledger.status('private:1'));
         const degraded = current.action !== 'normal' || current.enabled && current.spentCny + current.reservedCny + first.amount >= current.dailyLimitCny * 0.8 || globalChecks.some(s=>s.action!=='normal'||s.spentCny+s.reservedCny+first.amount>=s.dailyLimitCny*.8);
@@ -297,6 +311,7 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         const p = authorize(config(), currentConversationContext()); sync(p);
         if (currentConversationContext().conversationKey !== token.key || currentConversationContext().requestId !== token.requestId
           || token.sourceId !== p.source.id || token.sourceVersion !== p.source.version || token.configFingerprint !== fundingFingerprint(p, token.key)) throw error('付费来源或请求配置已变化');
+        if(token.free){if(!verifiedFreeQuote(p))throw error('免费模型报价已变化');freeCalls.dispatch(token.id);return;}
         const current = budget.status(token.key),checks=[current,...[p.source.mode==='trial'?trial(p):null,total(p)].filter(Boolean).map(l=>l.status('private:1'))];
         if (checks.some(s=>s.action!=='normal') && !token.degraded) throw error('费用已达到节流阈值，请按新限制重新发起请求');
         const raw = storage.readText('interactive-cooldown'), prior = raw === null ? {} : JSON.parse(raw);
@@ -316,10 +331,11 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
       let raw; try { raw = JSON.parse(text); } catch { return this.unknown(token, 'invalid_json'); }
       const amount = usageCost(raw, token);
       if (amount === null) return this.unknown(token, 'missing_usage');
+      if(token.free){if(amount!==0)throw error('免费模型返回了非零费用');return storage.transaction(()=>freeCalls.complete(token.id));}
       return storage.transaction(()=>{const value=budget.settle(token.id,{amount,currency:'CNY'});if(token.trialHoldId)trial(effectivePolicy(config())).settle(token.trialHoldId,{amount,currency:'CNY'});if(token.totalHoldId)totalBudget.settle(token.totalHoldId,{amount,currency:'CNY'});return value;});
     },
-    unknown(token, reason = 'network_error') { return storage.transaction(()=>{const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});if(token.totalHoldId)totalBudget.markUnknown(token.totalHoldId,{reason});return value;}); },
-    release(token) { return storage.transaction(()=>{const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);if(token.totalHoldId)totalBudget.release(token.totalHoldId);return value;}); },
+    unknown(token, reason = 'network_error') { return storage.transaction(()=>{if(token.free)return freeCalls.unknown(token.id);const value=budget.markUnknown(token.id,{reason});if(token.trialHoldId)trial(effectivePolicy(config())).markUnknown(token.trialHoldId,{reason});if(token.totalHoldId)totalBudget.markUnknown(token.totalHoldId,{reason});return value;}); },
+    release(token) { return storage.transaction(()=>{if(token.free)return freeCalls.release(token.id);const value=budget.release(token.id);if(token.trialHoldId)trial(effectivePolicy(config())).release(token.trialHoldId);if(token.totalHoldId)totalBudget.release(token.totalHoldId);return value;}); },
     attributions() { const raw = storage.readText('call-attribution'); return raw === null ? {} : JSON.parse(raw); },
     serviceStatus(key, limits) { return storage.transaction(()=>{syncService(key,serviceAuthorization(()=>limits));return {scope:speechBudget.status(key),platform:speechTotal.status('private:1')};}); },
     prepareService({ service, operationId=crypto.randomUUID(), amountCny, assertAuthorized,purpose='requested',characters,voiceType }={}) {
