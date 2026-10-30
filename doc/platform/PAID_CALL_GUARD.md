@@ -14,6 +14,8 @@
 
 开发时没有 `productionBudget` 字段保持上游行为。生产必须设置 `QQ_AGENT_REQUIRE_BUDGET=1`：缺失配置也拒绝付费。只要配置了该字段，`enabled` 非 `true` 就停止付费，而不是取消预算限制。一个进程已建立生产账本后再删除该字段也不会退回无保护模式。
 
+所有者可显式设置 `productionBudget.enforceLimits=false`，取消本地金额限额；省略该字段仍执行原限额。此时 `enabled` 保持 `true`，聊天、平台体验、可选实例总额以及语音会话和平台总额均继续预留、结算及保留未知费用，但不再因金额或80%阈值降级、拒绝。接口返回 `limitsEnforced:false`、`state:'unlimited'`、`remainingCny:null`，原限额数值与历史记录保留，恢复 `enforceLimits=true` 后按原值执行。出资授权、完整报价、发送幂等、撤权复核、语音字符上限及冷却仍有效；供应商套餐额度不受该本地开关影响。此字段由可信维护配置管理，普通工作台账号不能修改。
+
 ## 配置契约
 
 以下全是虚构会话与测试端点，不含生产配置。生产构建脚本应先调用导出的 `validateProductionBudgetConfig(完整配置)`。

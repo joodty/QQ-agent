@@ -84,4 +84,13 @@ test('typed manual speech uses selected voices and the original paid ledger for 
  await t.test('a total budget tightened during synthesis blocks QQ delivery while retaining the already settled voice cost',async()=>{
   const q=(await quote(['private:203'],message)).data;assert.equal(q.allowed,true);ttsGate={started:deferred(),wait:deferred()};const pending=send('private:203',message,q.speechPolicyVersions);await ttsGate.started.promise;const qq=ob.state.sends.length;app.updateConfig({productionBudget:{overrides:{'private:203':0}}});ttsGate.wait.resolve();ttsGate=null;const result=await pending;assert.equal(result.status,200);assert.equal(result.data.status,'failed');assert.equal(result.data.stage,'qq_pending');assert.equal(result.data.ttsOutcome,'settled');assert.equal(ob.state.sends.length,qq);assert.equal(paid.productionPaidCallGuard().records({key:'private:203'}).at(-1).state,'settled');
  });
+ await t.test('unlimited batch quotes ignore stored money caps while retaining scope authorization and character limits',async()=>{
+  const before=cloudCalls.length,qq=ob.state.sends.length,platform=app.speechService.platformOverview(adminPrincipal);
+  app.speechService.updatePlatform(adminPrincipal,{expectedVersion:platform.version,dailyLimitCny:.000001});
+  app.updateConfig({productionBudget:{enforceLimits:false,overrides:{'group:101':.000001,'private:203':0}}});
+  const result=await quote(['group:101','private:203'],message);assert.equal(result.status,200);assert.equal(result.data.allowed,true);assert.ok(result.data.targets.every(row=>row.allowed));
+  assert.equal((await quote(['private:1234567'],message)).status,403);
+  assert.equal((await quote(['group:101'],{...message,text:'x'.repeat(51)})).data.allowed,false);
+  assert.equal(cloudCalls.length,before);assert.equal(ob.state.sends.length,qq);
+ });
 });

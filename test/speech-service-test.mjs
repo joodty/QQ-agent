@@ -33,6 +33,21 @@ async function fixture(t,{initialSpent={},trial=false}={}){
   return f;
 }
 
+test('unlimited model and speech amounts still require explicit speech authorization and retain real charges',async t=>{
+ const f=await fixture(t);f.cfg.productionBudget.enforceLimits=false;f.cfg.productionBudget.defaultDailyLimitCny=.000001;setRuntimeConfig(f.cfg);
+ f.enable('group:101',['platform'],.000001);
+ let p=f.service.platformOverview(f.admin);f.service.updatePlatform(f.admin,{expectedVersion:p.version,dailyLimitCny:.000001});
+ const q=f.service.quoteForAccount(f.user,{chatKey:'group:101',text:'你好，世界。',voiceType:101001});
+ assert.equal(q.allowed,true);assert.equal(q.capacity.platformCny,null);
+ const audio=await f.call();assert.ok(audio.audio.length>0);assert.equal(f.requests.length,1);
+ assert.equal(f.guard.status('group:101').state,'unlimited');assert.ok(f.guard.status('group:101').spentCny>.000001);
+ f.reopen();assert.equal(f.service.platformOverview(f.admin).limitsEnforced,false);assert.equal(f.service.runtimePolicy('group:101').allowed,true);
+ f.advance(1001);f.cfg.productionBudget.enforceLimits=true;setRuntimeConfig(f.cfg);await assert.rejects(f.call());assert.equal(f.requests.length,1);
+ f.cfg.productionBudget.enforceLimits=false;setRuntimeConfig(f.cfg);const grant=f.service.runtimePolicy('group:101').subsidy;
+ f.service.updateSubsidy(f.admin,{chatKey:'group:101',expectedVersion:grant.version,enabled:false,allowedFundingModes:['platform'],dailyLimitCny:.000001});
+ await assert.rejects(f.call());assert.equal(f.requests.length,1);
+});
+
 test('missing credentials, platform opt-in, resource subsidy and explicit request each deny before HTTP or ledger reservation',async t=>{
   const f=await fixture(t);f.setSecret(null);assert.equal(f.service.runtimePolicy('group:101').configured,false);
   assert.throws(()=>f.service.updatePlatform(f.admin,{expectedVersion:1,enabled:true}),{code:'SPEECH_NO_CREDENTIAL'});

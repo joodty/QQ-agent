@@ -59,6 +59,19 @@ function fixture(t, { total = 1, initialSpent = {}, trial = false } = {}) {
   };
 }
 
+test('unlimited mode tracks shared instance and trial costs and restores their existing caps', t => {
+  const f = fixture(t, { trial: true, total: .001 }); f.cfg.productionBudget.enforceLimits = false;
+  const llm = f.llm(); f.dispatch(llm); f.complete(llm, .02);
+  const voice = f.speech('private:123', .03); f.dispatchSpeech(voice); f.guard.settleService(voice.token);
+  assert.equal(f.guard.totalStatus().state, 'unlimited'); assert.equal(f.guard.trialStatus().state, 'unlimited');
+  assert.equal(f.guard.totalStatus().spentCny, .05); assert.equal(f.guard.trialStatus().spentCny, .05);
+  const records = f.guard.records(); f.rebuild(); assert.deepEqual(f.guard.records(), records);
+  f.cfg.productionBudget.enforceLimits = true;
+  assert.equal(f.guard.totalStatus().state, 'exhausted');
+  assert.throws(() => f.llm('group:456'), { code: 'PAID_CALL_DENIED' });
+  assert.deepEqual(f.guard.records(), records);
+});
+
 test('confirmed authentication rejection releases conversation, trial and instance holds together', t => {
   const f = fixture(t, { trial: true });
   f.cfg.api.baseUrl = f.cfg.productionBudget.endpoint = 'https://api.commandcode.ai/alpha';

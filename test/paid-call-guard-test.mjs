@@ -41,6 +41,61 @@ function fixture(t) {
   };
 }
 
+test('unlimited spending preserves accounting and authorization and can restore the original limits', t => {
+  const f = fixture(t); f.cfg.productionBudget.enforceLimits = false;
+  f.cfg.productionBudget.overrides['group:123'] = .001;
+  inContext(() => {
+    const token = f.prepare({ purpose: 'proactive', direct: false }); f.guard.dispatch(token);
+    f.guard.complete(token, { text: response({ prompt_tokens: 100, completion_tokens: 1000, total_tokens: 1100 }) });
+    const pending = f.prepare({ purpose: 'memory' }); f.guard.dispatch(pending); f.guard.unknown(pending, 'network_error');
+  });
+  const before = f.guard.records(), status = f.guard.status('group:123');
+  assert.equal(status.state, 'unlimited'); assert.equal(status.limitsEnforced, false);
+  assert.equal(status.remainingCny, null); assert.ok(status.spentCny > .001); assert.ok(status.reservedCny > .001);
+  f.rebuild(); assert.deepEqual(f.guard.records(), before);
+  assert.equal(f.guard.status('group:123').state, 'unlimited');
+  f.cfg.productionBudget.enforceLimits = true;
+  assert.equal(f.guard.status('group:123').state, 'exhausted');
+  assert.throws(() => inContext(() => f.prepare({ purpose: 'proactive', direct: false })), { code: 'PAID_CALL_DENIED' });
+  f.cfg.productionBudget.enforceLimits = false;
+  f.cfg.productionBudget.funding['group:123'].enabled = false;
+  assert.throws(() => inContext(() => f.prepare()), { code: 'PAID_CALL_DENIED' });
+  assert.deepEqual(f.guard.records(), before);
+  f.cfg.productionBudget.enforceLimits = 'false';
+  assert.throws(() => validateProductionBudgetConfig(f.cfg), { code: 'PAID_CALL_DENIED' });
+});
+
+test('unlimited speech keeps its cost records, cooldown and duplicate-operation protection', t => {
+  const f = fixture(t); f.cfg.productionBudget.enforceLimits = false;
+  f.cfg.productionBudget.overrides['group:123'] = .001;
+  const scope = context(), limits = () => ({ id: 'fixture-speech', version: 'fixture-v1', scopeDailyLimitCny: .001, platformDailyLimitCny: .001, cooldownMs: 1000 });
+  runWithConversationContext(scope, () => {
+    const request = { service: 'speech', operationId: 'fixture-unlimited-voice', amountCny: .02, assertAuthorized: limits };
+    const token = f.guard.prepareService(request); f.guard.dispatchService(token); f.guard.settleService(token);
+    assert.equal(f.guard.status('group:123').spentCny, .02);
+    const extra = f.guard.serviceStatus('group:123', limits());
+    assert.equal(extra.scope.state, 'unlimited'); assert.equal(extra.platform.state, 'unlimited');
+    assert.equal(extra.scope.spentCny, .02); assert.equal(extra.platform.spentCny, .02);
+    assert.throws(() => f.guard.prepareService(request), { code: 'PAID_CALL_DENIED' });
+    const tooSoon = f.guard.prepareService({ ...request, operationId: 'fixture-too-soon' });
+    assert.throws(() => f.guard.dispatchService(tooSoon), { code: 'PAID_CALL_DENIED' });
+    f.guard.releaseService(tooSoon);
+  });
+});
+
+test('unlimited budget page displays no amount cap and cannot silently resubmit stored limits', async t => {
+  const dom = new JSDOM(fs.readFileSync(new URL('../ui/production-budgets.html', import.meta.url), 'utf8'), { url: 'http://budget.example.test', runScripts: 'outside-only' });
+  t.after(() => dom.window.close()); const methods = [];
+  dom.window.fetch = async (url, options) => { methods.push(options?.method || 'GET'); return { ok: true, json: async () => ({ enabled: true, limitsEnforced: false, version: 'fixture', defaultDailyLimitCny: 1, overrides: {}, conversations: [{ key: 'group:123', date: '2026-10-30', state: 'unlimited', limitsEnforced: false, spentCny: 2, reservedCny: 3, remainingCny: null, unknownReservations: 1 }] }) }; };
+  dom.window.eval(fs.readFileSync(new URL('../ui/production-budgets.js', import.meta.url), 'utf8'));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(dom.window.document.querySelector('#status').textContent, /限额已取消/);
+  assert.match(dom.window.document.querySelector('#conversations').textContent, /金额不限额/);
+  assert.equal(dom.window.document.querySelector('#save').disabled, true);
+  dom.window.document.querySelector('#limits').dispatchEvent(new dom.window.Event('submit', { cancelable: true }));
+  await new Promise(resolve => setTimeout(resolve, 0)); assert.deepEqual(methods, ['GET']);
+});
+
 test('confirmed Command Code authentication rejection releases its hold and preserves the audit row', t => {
   const f = fixture(t);
   f.cfg = config('https://api.commandcode.ai/alpha');
