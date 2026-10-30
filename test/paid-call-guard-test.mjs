@@ -41,6 +41,48 @@ function fixture(t) {
   };
 }
 
+test('confirmed Command Code authentication rejection releases its hold and preserves the audit row', t => {
+  const f = fixture(t);
+  f.cfg = config('https://api.commandcode.ai/alpha');
+  f.rebuild();
+  inContext(() => {
+    const token = f.prepare(); f.guard.dispatch(token);
+    assert.ok(f.guard.status('group:123').reservedCny > 0);
+    f.guard.complete(token, { status: 401, text: JSON.stringify({ success: false, error: { code: 'UNAUTHORIZED', status: 401 } }) });
+    const records = f.guard.records();
+    assert.equal(records.length, 1);
+    assert.equal(records[0].id, token.id);
+    assert.equal(records[0].state, 'released');
+    assert.equal(records[0].actualCny, null);
+    assert.equal(f.guard.status('group:123').reservedCny, 0);
+    assert.equal(f.guard.status('group:123').spentCny, 0);
+  });
+  f.rebuild();
+  assert.equal(f.guard.records()[0].state, 'released');
+});
+
+test('authentication reconciliation does not guess from other statuses, endpoints, bodies or usage', t => {
+  const rejected = { success: false, error: { code: 'UNAUTHORIZED', status: 401 } };
+  const cases = [
+    { status: 400, raw: rejected }, { status: 403, raw: rejected },
+    { status: 429, raw: rejected }, { status: 500, raw: rejected },
+    { status: 401, raw: { ...rejected, success: true } },
+    { status: 401, raw: { ...rejected, error: { code: 'UNKNOWN', status: 401 } } },
+    { status: 401, raw: { ...rejected, usage: null } },
+    { status: 401, raw: { ...rejected, choices: [] } },
+    { status: 401, raw: rejected, endpoint: 'https://fixture.example.test/v1' }
+  ];
+  for (const entry of cases) {
+    const f = fixture(t); f.cfg = config(entry.endpoint || 'https://api.commandcode.ai/alpha'); f.rebuild();
+    inContext(() => {
+      const token = f.prepare(); f.guard.dispatch(token);
+      f.guard.complete(token, { status: entry.status, text: JSON.stringify(entry.raw) });
+      assert.equal(f.guard.records()[0].state, 'unknown');
+      assert.ok(f.guard.status('group:123').reservedCny > 0);
+    });
+  }
+});
+
 test('strict production configuration refuses missing, unknown and malformed quotes', () => {
   for (const edit of [p => p.enabled = false, p => p.prices.inputCnyPerMillion = '2', p => p.prices.outputCnyPerMillion = NaN,
     p => p.prices.cacheHitCnyPerMillion = -1, p => delete p.prices.reasoningIncluded, p => p.endpoint = 'https://user:pass@example.invalid/v1',

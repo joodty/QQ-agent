@@ -59,6 +59,22 @@ function fixture(t, { total = 1, initialSpent = {}, trial = false } = {}) {
   };
 }
 
+test('confirmed authentication rejection releases conversation, trial and instance holds together', t => {
+  const f = fixture(t, { trial: true });
+  f.cfg.api.baseUrl = f.cfg.productionBudget.endpoint = 'https://api.commandcode.ai/alpha';
+  const ticket = f.llm(); f.dispatch(ticket);
+  assert.ok(f.guard.status('group:123').reservedCny > 0);
+  assert.ok(f.guard.trialStatus().reservedCny > 0);
+  assert.ok(f.guard.totalStatus().reservedCny > 0);
+  f.guard.complete(ticket.token, { status: 401, text: JSON.stringify({ success: false, error: { code: 'UNAUTHORIZED', status: 401 } }) });
+  assert.equal(f.guard.status('group:123').reservedCny, 0);
+  assert.equal(f.guard.trialStatus().reservedCny, 0);
+  assert.equal(f.guard.totalStatus().reservedCny, 0);
+  f.rebuild();
+  assert.equal(f.guard.records()[0].state, 'released');
+  assert.equal(f.guard.totalStatus().spentCny, 0);
+});
+
 test('LLM and speech across group/private resources share reservation, dispatch, settlement and release totals', t => {
   const f = fixture(t), llm = f.llm(), speech = f.speech('private:123', .1);
   const reserved = f.guard.totalStatus().reservedCny;

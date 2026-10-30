@@ -327,8 +327,21 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         }
       });
     },
-    complete(token, { text }) {
+    complete(token, { text, status }) {
       let raw; try { raw = JSON.parse(text); } catch { return this.unknown(token, 'invalid_json'); }
+      // The gateway rejected this request before model execution. Keep all
+      // ambiguous errors conservative; only its exact HTTP 401 contract is
+      // evidence that these dispatched reservations were not charged.
+      if (!token.free && token.endpoint === 'https://api.commandcode.ai/alpha'
+        && status === 401 && raw?.success === false && raw?.error?.code === 'UNAUTHORIZED'
+        && raw.error.status === 401 && !Object.hasOwn(raw, 'usage') && !Object.hasOwn(raw, 'choices')) {
+        return storage.transaction(() => {
+          const value = budget.release(token.id, { confirmedNotCharged: true });
+          if (token.trialHoldId) trial(effectivePolicy(config())).release(token.trialHoldId, { confirmedNotCharged: true });
+          if (token.totalHoldId) totalBudget.release(token.totalHoldId, { confirmedNotCharged: true });
+          return value;
+        });
+      }
       const amount = usageCost(raw, token);
       if (amount === null) return this.unknown(token, 'missing_usage');
       if(token.free){if(amount!==0)throw error('免费模型返回了非零费用');return storage.transaction(()=>freeCalls.complete(token.id));}
