@@ -532,7 +532,8 @@ export async function bingImageSearch(query, { limit = 8, browseLocked = false }
   if (!q) throw new Error('搜索关键词为空');
   const url = `https://cn.bing.com/images/search?q=${encodeURIComponent(q)}&form=HDRSC2`;
   // 图搜是"搜索阶段"，也必须受浏览锁定约束，否则锁定只挡下载不挡搜索，链条断一环
-  const { body } = await safeFetch(url, { browseLocked });
+  // 图片结果常在大型脚本/样式之后；通用网页的50KB上限会在首条结果前截断。
+  const { body } = await safeFetch(url, { browseLocked, maxBytes: 1024 * 1024 });
   const html = String(body ?? '');
   const out = [];
   const seen = new Set();
@@ -561,7 +562,7 @@ export async function baiduImageSearch(query, { limit = 8, browseLocked = false 
   const q = String(query ?? '').trim();
   if (!q) throw new Error('搜索关键词为空');
   const url = `https://image.baidu.com/search/index?tn=baiduimage&word=${encodeURIComponent(q)}`;
-  const { body } = await safeFetch(url, { browseLocked });
+  const { body } = await safeFetch(url, { browseLocked, maxBytes: 1024 * 1024 });
   const html = String(body ?? '');
   const out = [];
   const seen = new Set();
