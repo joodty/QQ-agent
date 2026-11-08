@@ -43,12 +43,47 @@ test('provider sends native format options and rejects bytes with a different fo
   });
 });
 
-function submit(tool, ctx, format) {
+function submit(tool, ctx, format, options = {}) {
   return runWithConversationContext({
     botId: 'primary', conversationKey: ctx.chatKey, actorId: actor,
     fundingRef: { id: 'platform', version: 1 }, personaRef: { id: 'primary', version: 1 }
-  }, () => tool.execute(ctx, { prompt: 'a circle', format }));
+  }, () => tool.execute(ctx, { prompt: 'a circle', format, ...options }));
 }
+
+test('a quoted reference can become a GIF with user-selected playback options', async () => {
+  const events = new EventEmitter();
+  const referenceImage = 'data:image/png;base64,' + png.toString('base64');
+  const ctx = {
+    chatKey: 'group:101', assertCurrent() {}, triggerEntries: [{ mid: '1', senderId: '7', reply: { mid: '-2' } }],
+    sender: {
+      async sendMedia(chatKey, segments) { events.emit('delivery', { chatKey, segments }); },
+      async sendTextBatch(_chatKey, messages) { events.emit('delivery', { messages }); }
+    }
+  };
+  const generate = createOpenAiImageProvider({ apiKey: 'fake', async fetchImpl(endpoint, { body }) {
+    assert.equal(endpoint, 'https://api.openai.com/v1/images/edits');
+    const request = JSON.parse(body);
+    assert.deepEqual(request.images, [{ image_url: referenceImage }]);
+    assert.equal(request.output_format, 'gif');
+    assert.equal(request.frame_count, 4);
+    assert.equal(request.frame_duration_ms, 180);
+    return Response.json({ data: [{ b64_json: gif.toString('base64') }] });
+  } });
+  const tool = createImageGenerationTool({
+    generate, captureAuthority: () => ({}), assertAuthority() {},
+    async loadReference(_ctx, entry) {
+      assert.equal(entry.reply.mid, '-2');
+      return referenceImage;
+    },
+    paidGuard: () => ({ prepareImage: args => args, dispatch() {}, completeImage() {} }),
+  });
+  assert.equal(submit(tool, ctx, 'svg', { reference: true }).isError, true);
+  const delivery = once(events, 'delivery', { signal: AbortSignal.timeout(3000) });
+  assert.match(submit(tool, ctx, 'gif', { reference: true, frames: 4, frameMs: 180 }).content, /已排队/);
+  assert.deepEqual(await delivery, [{
+    chatKey: 'group:101', segments: [{ type: 'image', data: { file: 'base64://' + gif.toString('base64') } }]
+  }]);
+});
 
 test('acknowledges immediately, deduplicates, and delivers through the original chat with isolated funding context', async () => {
   const events = new EventEmitter();
