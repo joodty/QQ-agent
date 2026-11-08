@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 import { getConfig, updateConfig, ROOT, DATA_DIR, setArchivePersonaResolver } from './config.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { isAtMe } from './prompt.js';
+import { quotedVoiceInChat, selectVoiceInput, transcribeQqVoice } from './qq-voice-input.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
 import { scopeArchiveMemory } from './archive-runtime.js';
@@ -918,19 +919,28 @@ export function createApp({ log = console.log, speechCredentials = undefined, ho
     return null;
   }
 
-  async function resolveReply(messageId) {
+  async function resolveReply(messageId, voiceChat = null) {
     try {
       const msg = await onebot.getMsg(messageId);
       const senderName = msg?.sender?.card || msg?.sender?.nickname || '';
       let text = '';
+      let voiceText = null;
       if (Array.isArray(msg?.message)) {
         text = msg.message.map((s) => (s.type === 'text' ? s.data?.text ?? '' : `[${s.type}]`)).join('').trim();
       } else if (typeof msg?.message === 'string') {
         text = msg.message;
       }
+      if (voiceChat && quotedVoiceInChat(msg, voiceChat.kind, voiceChat.id, onebot.selfId)) {
+        const quotedSender = String(msg.sender?.user_id ?? msg.user_id ?? '');
+        const current = getConfig();
+        const groupBlocked = voiceChat.kind === 'group' && (current.blocklist?.[voiceChat.id] || []).map(String).includes(quotedSender);
+        if (!orchestrator.paused && resourceAllowed(voiceChat.kind, voiceChat.id, current) && !isGloballyBlocked(quotedSender) && !groupBlocked) {
+          voiceText = await transcribeQqVoice(onebot, messageId);
+        }
+      }
       // senderId 一并带回：引用块显示为 名字(QQ:xxx)，与发言人标签同口径 ——
       // 没有它，模型分不清引用的是"哪个张三"
-      return { sender: String(senderName), senderId: String(msg?.sender?.user_id ?? ''), text: String(text).slice(0, 120) };
+      return { sender: String(senderName), senderId: String(msg?.sender?.user_id ?? ''), text: voiceText ?? String(text).slice(0, 120) };
     } catch {
       return null;
     }
@@ -957,12 +967,16 @@ export function createApp({ log = console.log, speechCredentials = undefined, ho
     let text;
     const atMarks = [];   // @ 段收集（qq + 渲染原文）：档位判定的权威依据（2026-09-26）
     if (segments) {
+      const nativeVoice = process.env.QQ_AGENT_QQ_TRANSCRIPTION === '1' && !hostedWorker;
+      const voiceInput = nativeVoice && !orchestrator.paused ? selectVoiceInput({ kind, segments, selfId: onebot.selfId }) : null;
+      const voiceText = voiceInput === 'direct' ? await transcribeQqVoice(onebot, event.message_id) : null;
       text = await segmentsToText(segments, {
-        resolveReply: (mid) => resolveReply(mid),
+        resolveReply: (mid) => resolveReply(mid, voiceInput === 'quote' ? { kind, id } : null),
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null,
         onAt: (m) => atMarks.push(m),
         // 语音转写（`media.transcribe`）要用它去 get_record 取音频
-        onebot
+        onebot: nativeVoice ? null : onebot,
+        voiceText
       });
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();

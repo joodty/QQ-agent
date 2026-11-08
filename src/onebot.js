@@ -496,7 +496,7 @@ export function forwardIdFromData(d) {
  * onebot: OneBot 客户端，仅语音转写需要（`media.transcribe` 取语音文件用）；
  *         不传则语音保持 `[语音]` 占位。
  */
-export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, onAt = null } = {}) {
+export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, onebot = null, voiceText = null, onAt = null } = {}) {
   if (typeof segments === 'string') return sanitizeUserText(segments.trim());
   const out = [];
   for (const seg of segments ?? []) {
@@ -523,6 +523,11 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       case 'face': out.push(`[表情${d.id ?? ''}]`); break;
       case 'image': out.push('[图片]'); break;
       case 'record': {
+        if (voiceText !== null) {
+          out.push(voiceText);
+          voiceText = null;
+          break;
+        }
         // 语音转文字走 `media.transcribe` 能力（speech-to-text 插件提供）。
         // 只在主消息路径转写（onebot 由调用方传入）：转发链里逐条跑 whisper
         // 会把 ingest 串行阻塞住，代价不划算，那里保持占位符。
