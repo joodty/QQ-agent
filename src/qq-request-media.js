@@ -1,5 +1,5 @@
 import { detectImageType } from './image-type.js';
-import { extractMediaFromSegments } from './onebot.js';
+import { extractMediaFromSegments, segmentsToText } from './onebot.js';
 import { safeFetchBinary } from './safe-fetch.js';
 
 export function selectTriggerEntry(entries, messageId) {
@@ -19,6 +19,28 @@ function messageInChat(ctx, mid, message) {
     if (message.target_id != null) return String(message.target_id) === id;
   }
   return Boolean(ctx.store.findByMid(ctx.chatKey, mid));
+}
+
+export async function loadChatMessage(ctx, messageId) {
+  const saved = ctx.store.findByMid(ctx.chatKey, messageId);
+  if (saved) return saved;
+  const referenced = ctx.triggerEntries?.some(entry => String(entry.reply?.mid) === String(messageId));
+  if (!referenced || !/^-?[1-9]\d*$/.test(String(messageId)) || !Number.isSafeInteger(Number(messageId))) {
+    throw Error('当前聊天找不到这条消息，请引用原消息后再问。');
+  }
+  const message = await ctx.onebot.getMsg(messageId);
+  if (!message || !messageInChat(ctx, messageId, message) || !Array.isArray(message.message)) {
+    throw Error('引用的原消息已无法读取，请在当前聊天重新发送。');
+  }
+  ctx.assertCurrent?.();
+  return {
+    mid: String(messageId),
+    ts: Number(message.time || 0) * 1000,
+    senderId: String(message.sender?.user_id ?? message.user_id ?? ''),
+    senderName: String(message.sender?.card || message.sender?.nickname || ''),
+    text: await segmentsToText(message.message, { includeReply: false }),
+    media: extractMediaFromSegments(message.message),
+  };
 }
 
 export async function loadReferenceImage(ctx, entry, download = safeFetchBinary) {

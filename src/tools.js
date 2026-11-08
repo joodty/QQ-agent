@@ -9,7 +9,7 @@
 import { getConfig } from './config.js';
 import { speechToolDefinition } from './speech-runtime.js';
 import { configuredImageGenerationTool } from './image-generation-tool.js';
-import { selectTriggerEntry } from './qq-request-media.js';
+import { selectTriggerEntry, loadChatMessage } from './qq-request-media.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
@@ -518,8 +518,7 @@ function registerAllTools() {
     },
     async execute(ctx, args) {
       try {
-        const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-        if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+        const entry = await loadChatMessage(ctx, args.messageId);
         // 存档里已是展开文本（收消息时已展开/之前展开过）→ 直接给，不再请求 QQ
         if (String(entry.text || '').startsWith('[合并转发 共')) {
           return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
@@ -599,8 +598,9 @@ function registerAllTools() {
       required: ['messageId']
     },
     async execute(ctx, args) {
-      const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-      if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+      let entry;
+      try { entry = await loadChatMessage(ctx, args.messageId); }
+      catch (error) { return err(error.message); }
       return ok({
         messageId: entry.mid,
         time: new Date(entry.ts).toLocaleString('zh-CN', { hour12: false }),
@@ -626,9 +626,14 @@ function registerAllTools() {
     },
     async execute(ctx, args) {
       try {
-        const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-        if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-        const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url);
+        const entry = await loadChatMessage(ctx, args.messageId);
+        let media = entry.media || [];
+        if (!media.some(m => m.kind === 'image') && /\[(?:合并转发|转发消息)/.test(entry.text)) {
+          const forwarded = await ctx.onebot.call('get_forward_msg', { message_id: Number(entry.mid) });
+          const expanded = await expandForwardNodes(forwarded?.messages);
+          media = expanded?.media || [];
+        }
+        const urls = media.filter((m) => m.kind === 'image' && m.url).map((m) => m.url);
         if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
         const results = [];
         const failed = [];
@@ -880,18 +885,54 @@ function registerAllTools() {
     description: '查看当前会话里还没触发的所有提醒（闹钟）。适用：群友问"我设了什么提醒"、"还有哪些闹钟"。',
     category: 'system',
     icon: '📋',
-    parameters: { type: 'object', properties: {} },
-    async execute(ctx) {
+    parameters: { type: 'object', properties: {
+      includeRecent: { type: 'boolean', description: '想把刚触发的提醒延后时传 true，包含最近十条已触发提醒。' }
+    } },
+    async execute(ctx, args = {}) {
       if (!ctx.reminders) return err('提醒服务未启用');
-      const list = ctx.reminders.pending(ctx.chatKey);
+      const list = [...ctx.reminders.pending(ctx.chatKey), ...(args.includeRecent ? ctx.reminders.recentFired(ctx.chatKey) : [])];
       if (!list.length) return ok({ count: 0, note: '当前没有待触发的提醒。' });
       const lines = list.map((r) => {
         const d = new Date(r.dueAt);
         const whenStr = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-        return `- [${r.id}] ${whenStr}：${r.text}`;
+        return `- [${r.id}] ${whenStr}：${r.text}（发起人 QQ ${r.createdBy}，${r.fired ? '已触发' : '待触发'}）`;
       });
       return ok({ count: list.length, reminders: lines.join('\n') });
     }
+  });
+
+  registerTool({
+    id: 'reschedule_reminder',
+    name: '修改提醒时间',
+    description: '用户明确要求改时间、推迟或再提醒一次时使用。先用 list_reminders 查出提醒 id，最近已触发的提醒可用 includeRecent=true 查。只改本会话请求者自己的提醒。存在多条候选且指代不明时先询问。成功后告诉用户完整的新日期和时间。',
+    category: 'system',
+    icon: '⏰',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'list_reminders 返回的提醒 id。' },
+        requestMessageId: { type: 'string', description: '发起改期的未读消息编号，多条未读时必填。' },
+        delayMinutes: { type: 'number', description: '从现在起多少分钟后再提醒，与 atTime 二选一。' },
+        atTime: { type: 'string', description: '新的提醒时间，YYYY-MM-DD HH:MM 或 HH:MM。' },
+      },
+      required: ['id'],
+    },
+    async execute(ctx, args) {
+      if (!ctx.reminders) return err('提醒服务未启用');
+      const request = ctx.proactive ? null : selectTriggerEntry(ctx.triggerEntries, args.requestMessageId);
+      if (!request || request.mid == null) return err('请提供这批未读消息中发起改期的消息编号。');
+      if ((args.delayMinutes != null) === Boolean(args.atTime)) return err('相对时间和具体时间选一个。');
+      const dueAt = args.atTime ? parseAtTime(String(args.atTime))
+        : Number.isFinite(args.delayMinutes) && args.delayMinutes > 0 ? Date.now() + args.delayMinutes * 60000 : null;
+      if (!dueAt || !Number.isFinite(new Date(dueAt).getTime()) || dueAt <= Date.now()) return err('请选择未来的提醒时间。');
+      ctx.assertCurrent?.();
+      const updated = ctx.reminders.reschedule(String(args.id), ctx.chatKey, request.senderId, dueAt, String(request.mid));
+      if (!updated) return err('找不到这条属于你的提醒，请查看本聊天的提醒列表。');
+      return ok({
+        changed: true, id: updated.id, text: updated.text, dueAt: updated.dueAt,
+        when: new Date(updated.dueAt).toLocaleString('zh-CN', { hour12: false }),
+      });
+    },
   });
 
   registerTool({

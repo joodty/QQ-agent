@@ -65,10 +65,28 @@ export class ReminderStore {
     return this.reminders.filter((r) => !r.fired && r.dueAt <= now);
   }
 
+  recentFired(chatKey) {
+    return this.reminders.filter(r => r.chatKey === chatKey && r.fired)
+      .sort((a, b) => (b.firedAt || 0) - (a.firedAt || 0)).slice(0, 10);
+  }
+
+  reschedule(id, chatKey, requester, dueAt, requestMessageId) {
+    const current = this.reminders.find(r => r.id === id && r.chatKey === chatKey &&
+      r.requestMessageId != null && r.createdBy === requester);
+    if (!current) return null;
+    if (current.lastChangeMessageId === requestMessageId) return current;
+    if (!Number.isFinite(new Date(dueAt).getTime()) || dueAt <= Date.now()) throw Error('请选择未来的提醒时间。');
+    const changed = { ...current, dueAt, fired: false, firedAt: null, lastChangeMessageId: requestMessageId };
+    const next = this.reminders.map(r => r === current ? changed : r);
+    save(next);
+    this.reminders = next;
+    return changed;
+  }
+
   /** 标记一条提醒已触发（落盘）。 */
-  markFired(id) {
+  markFired(id, expected = null) {
     const r = this.reminders.find((x) => x.id === id);
-    if (!r) return false;
+    if (!r || (expected && r !== expected)) return false;
     r.fired = true;
     r.firedAt = Date.now();
     save(this.reminders);

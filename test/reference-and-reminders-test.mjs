@@ -7,13 +7,76 @@ import { join } from 'node:path';
 const dir = mkdtempSync(join(tmpdir(), 'qq-agent-reference-test-'));
 process.env.QQ_AGENT_DATA_DIR = dir;
 test.after(() => rmSync(dir, { recursive: true, force: true }));
-const { loadReferenceImage } = await import('../src/qq-request-media.js');
+const { loadReferenceImage, loadChatMessage } = await import('../src/qq-request-media.js');
 const { createOpenAiImageProvider } = await import('../src/image-generation-provider.js');
 const { ReminderStore } = await import('../src/reminders.js');
 const { Orchestrator } = await import('../src/orchestrator.js');
 const { buildToolDefs } = await import('../src/tools.js');
 const { SendQueue } = await import('../src/sender.js');
 const bytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+
+test('quoted messages missing from history are read in scope and merged forwards can be expanded', async () => {
+  let fetched = 0;
+  const ctx = {
+    chatKey: 'group:101', triggerEntries: [{ mid: '90', senderId: '10', reply: { mid: '-12' } }],
+    store: { findByMid() { return null; }, updateByMid() { return false; } },
+    onebot: {
+      async getMsg(mid) {
+        fetched++;
+        assert.equal(String(mid), '-12');
+        return { message_type: 'group', group_id: 101, time: 1700000000,
+          sender: { user_id: 10, nickname: 'A' },
+          message: [{ type: 'image', data: { url: 'https://example.test/a.png' } }, { type: 'forward', data: {} }],
+        };
+      },
+      async call(action, args) {
+        assert.equal(action, 'get_forward_msg');
+        assert.equal(args.message_id, -12);
+        return { messages: [{ sender: { user_id: 10, nickname: 'A' },
+          content: [{ type: 'text', data: { text: '周五八点集合' } }] }] };
+      },
+    },
+  };
+  const message = await loadChatMessage(ctx, '-12');
+  assert.equal(message.media[0].url, 'https://example.test/a.png');
+  await assert.rejects(loadChatMessage(ctx, '999'), /找不到/);
+  assert.equal(fetched, 1, 'An arbitrary id cannot query QQ');
+  await assert.rejects(loadChatMessage({ ...ctx, chatKey: 'group:102' }, '-12'), /无法读取/);
+  await assert.rejects(loadChatMessage({ ...ctx, chatKey: 'private:10' }, '-12'), /无法读取/);
+  const defs = buildToolDefs();
+  const detail = await defs.find(d => d.id === 'get_message_detail').execute(ctx, { messageId: '-12' });
+  assert.match(detail.content, /合并转发/);
+  const expanded = await defs.find(d => d.id === 'read_forward').execute(ctx, { messageId: '-12' });
+  assert.match(expanded.content, /周五八点集合/);
+});
+
+test('a reminder can be moved or snoozed by its owner, persists and ignores stale firing completion', async () => {
+  const reminders = new ReminderStore();
+  const original = reminders.add({ chatKey: 'group:105', text: '开会', dueAt: Date.now() + 60_000, createdBy: '200', requestMessageId: '40' });
+  const defs = buildToolDefs();
+  const change = defs.find(d => d.id === 'reschedule_reminder');
+  const ctx = { chatKey: 'group:105', reminders, triggerEntries: [{ mid: '41', senderId: '200' }] };
+  const args = { id: original.id, delayMinutes: 10 };
+  assert.equal((await change.execute({ ...ctx, chatKey: 'group:106' }, args)).isError, true);
+  assert.equal((await change.execute({ ...ctx, triggerEntries: [{ mid: '42', senderId: '100' }] }, args)).isError, true);
+  assert.equal((await change.execute(ctx, { ...args, delayMinutes: -1 })).isError, true);
+  assert.equal((await change.execute(ctx, args)).isError, undefined);
+  const moved = reminders.pending(ctx.chatKey)[0];
+  assert.ok(moved.dueAt > original.dueAt);
+  assert.equal(reminders.markFired(original.id, original), false);
+  assert.equal(new ReminderStore().pending(ctx.chatKey)[0].dueAt, moved.dueAt);
+  await change.execute(ctx, { ...args, delayMinutes: 20 });
+  assert.equal(reminders.pending(ctx.chatKey)[0].dueAt, moved.dueAt);
+  reminders.markFired(moved.id);
+  const list = await defs.find(d => d.id === 'list_reminders').execute(ctx, { includeRecent: true });
+  assert.match(list.content, /已触发/);
+  assert.match(list.content, /200/);
+  await change.execute({ ...ctx, triggerEntries: [{ mid: '43', senderId: '200' }] }, args);
+  const restored = new ReminderStore().pending(ctx.chatKey);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].id, original.id);
+  reminders.cancel(original.id, ctx.chatKey, '200');
+});
 
 test('uploads the actual reference bytes to the edit endpoint', async () => {
   const url = 'https://example.test/reference.png';

@@ -160,6 +160,7 @@ function qqSceneRules() {
     '- 私聊被直接找通常要回，但也不用秒回；群聊更松散。',
     '- 带「引用/回复」的消息（如 `[引用 某群友：原文]`）表示这句话是在回应被引用的人；引用对象不是你时别抢话；只有引用的是你自己的消息、或文字里明确 @/提到你，才需要回应。'
   ];
+  lines.push('用户引用消息问“这个什么意思”时，优先读取引用块的 #消息编号。图片或 [image] 用 get_message_images，合并转发或 [forward] 用 read_forward，长文字用 get_message_detail。先读内容再回答。');
   if (vision) {
     lines.push(
       '- 消息里出现 [图片] / [表情]，或要用某个没备注的收藏表情时，可以用 get_message_images / get_sticker_image 看图（你能直接看懂图片内容），再自然回应；不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。'
@@ -311,6 +312,7 @@ function resolveCapabilityFn(name) {
 }
 
 function formatEntry(m, { withId = true } = {}) {
+  const quotedId = m.reply?.mid != null ? `[引用原消息 #${m.reply.mid}]` : '';
   const senderId = String(m.senderId || '');
   const replyPrefix = m.reply?.text || m.reply?.sender ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]` : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
@@ -330,7 +332,7 @@ function formatEntry(m, { withId = true } = {}) {
     const idSuffix = senderId && String(senderId) !== 'self' ? `(QQ:${senderId})` : '';
     who = m.self ? '我' : `${getConfig().memberNotes?.[senderId] || m.senderName || senderId || '未知'}${idSuffix}`;
   }
-  return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
+  return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${quotedId}${replyPrefix}${m.text}`;
 }
 
 /**

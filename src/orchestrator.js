@@ -1440,7 +1440,7 @@ export class Orchestrator {
             // 发送成功后才标记 fired；失败保留未触发状态，下一轮重试。
             // （反过来"先标记再发"会让 OneBot 断线/进程崩溃时的提醒永久丢失）
             await this.#fireReminder(r);
-            this.reminders.markFired(r.id);
+            this.reminders.markFired(r.id, r);
           } catch (error) {
             console.error('[reminder] 触发失败，将在下一轮重试:', error?.message ?? error);
           } finally {
@@ -1470,7 +1470,7 @@ export class Orchestrator {
     // 表现为提醒与正常发言并发抢发、限频计数不到它、超长提醒被协议端截断。
     // 失败必须向上抛，让调度循环保留未触发状态以便重试。
     const atUserId = kind === 'group' && r.requestMessageId != null && /^[1-9]\d*$/.test(r.createdBy) ? r.createdBy : null;
-    const guard = () => !this.paused && !this.aborted && this.reminders.pending(r.chatKey).some(entry => entry.id === r.id);
+    const guard = () => !this.paused && !this.aborted && this.reminders.pending(r.chatKey).some(entry => entry === r && entry.dueAt <= Date.now());
     await this.sender.sendTextBatch(r.chatKey, [text], { atUserId, guard }).then((result) => {
       // 极端边界：同一会话 8 秒窗口内两条文本完全相同的提醒，第二条会被发送去重
       // 拦下（sendTextBatch 正常返回但 deduped）。留个日志，别无声消失。
