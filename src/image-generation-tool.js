@@ -101,7 +101,9 @@ export function createImageGenerationTool({
       const retcode = reason.match(/\bretcode=(-?\d+)/)?.[1];
       const category = retcode ? `onebot-retcode-${retcode}` : /超时|timeout/i.test(reason) ? 'timeout' : 'send-failed';
       log('image job delivery unconfirmed', id, request.format, category);
-      if (result) await notify(job, '图片发送未确认。', 'delivery-failed');
+      if (result && ctx.chatKey.startsWith('private:')) {
+        await notify(job, '图片发送未确认。', 'delivery-failed');
+      }
     }
   }
 
