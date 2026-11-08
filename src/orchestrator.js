@@ -659,7 +659,8 @@ export class Orchestrator {
       } catch { /* 进度通知失败不影响正常回复 */ }
     };
     let waitingForReply = true;
-    const feedbackTimer = addressed && setTimeout(() => {
+    const drawingRequest = /画(?:一?[张幅个]|图|一下)|绘(?:画|图)|生图|(?:生成|做)(?:一?[张幅]|图)|\b(?:draw|generate an? image)\b/i.test(String(addressed?.text ?? ''));
+    const feedbackTimer = addressed && !drawingRequest && setTimeout(() => {
       void notify('我还在处理这条，稍等一下。', 'slow', () => waitingForReply && canNotify());
     }, replyFeedbackDelayMs);
     feedbackTimer?.unref?.();
@@ -1357,6 +1358,9 @@ export class Orchestrator {
       // 判定规则本身在插件里（canEndReplyBatch：失败发送 / 预告式结尾 / 该发图却没发
       // 等等都保留正常循环），这里只负责把现场信息递过去。
       // 插件没启用 / localPolicy 没开时该项为 false，行为与没有这套机制一致。
+      if (session.backgroundReply && toolResults.every(result => !result.isError && ['generate_image', 'finish'].includes(result.name))) {
+        finish = true;
+      }
       if (!finish) {
         const policyFn = this.#capFirst('reply.local-policy', skillContext);
         if (policyFn) {
@@ -1386,7 +1390,7 @@ export class Orchestrator {
     }
 
     // 收尾：发过话 = done；没发 = noreply（这是正常选项）
-    const status = session.error ? 'error' : (session.sent.length > 0 ? 'done' : 'noreply');
+    const status = session.error ? 'error' : (session.sent.length > 0 || session.backgroundReply ? 'done' : 'noreply');
     this.sessionAbortControllers.delete(session.id);
     this.sessions.finish(session.id, status);
     this.emit('session-end', {

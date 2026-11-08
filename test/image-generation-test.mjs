@@ -111,7 +111,7 @@ test('estimates require five successful samples per category and survive restart
   }
 });
 
-test('uses the requested message and sends only one overdue update before delivering PNG', async t => {
+test('uses the requested message and avoids repeat progress before delivering PNG', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const events = new EventEmitter();
   const progress = [];
@@ -153,7 +153,7 @@ test('uses the requested message and sends only one overdue update before delive
   assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
   t.mock.timers.tick(1);
   t.mock.timers.tick(60_000);
-  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。', '这张画得比平时久一些，还在等结果。']);
+  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
   const delivered = once(events, 'delivery');
   finish();
   await delivered;
@@ -183,7 +183,7 @@ test('only waiting jobs receive a position, counting active and queued work ahea
       notices.push([key, text, options.replyToMessageId]);
       events.emit(key);
     },
-    async sendMedia() {},
+    async sendMedia(key) { events.emit('delivered:' + key); },
   };
   const chats = ['1', '2', '3'].map(id => ({
     chatKey: `private:${id}`, triggerEntries: [{ mid: id, senderId: id }], sender, assertCurrent() {},
@@ -196,13 +196,10 @@ test('only waiting jobs receive a position, counting active and queued work ahea
     ['private:3', '接到了，前面还有 2 张，轮到就开画。', '3'],
     ['private:1', '开始画了，预计 10～20 秒。', '1'],
   ]);
-  const lastStarted = once(events, 'private:3', { signal: AbortSignal.timeout(3000) });
+  const lastDelivered = once(events, 'delivered:private:3', { signal: AbortSignal.timeout(3000) });
   finishFirst();
-  await lastStarted;
-  assert.deepEqual(notices.slice(3), [
-    ['private:2', '开始画了，预计 10～20 秒。', '2'],
-    ['private:3', '开始画了，预计 10～20 秒。', '3'],
-  ]);
+  await lastDelivered;
+  assert.deepEqual(notices.slice(3), []);
 });
 
 test('acknowledges immediately, deduplicates, and delivers through the original chat with isolated funding context', async () => {
@@ -260,12 +257,9 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
   ]);
   assert.deepEqual(notices.filter(([kind]) => kind === 'group'), [['group', '101', '开始画了。', '9']]);
   const privateNotices = notices.filter(([kind]) => kind === 'private');
-  assert.deepEqual(privateNotices.slice(0, 2), [
+  assert.deepEqual(privateNotices, [
     ['private', '202', '接到了，前面还有 1 张，轮到就开画。', '10'],
-    ['private', '202', '开始画了。', '10'],
   ]);
-  assert.match(privateNotices[2][2], /SVG 文件/);
-  assert.equal(privateNotices[2][3], '10');
   assert.equal(settlements.length, 2);
   assert.equal(submit(tool, { ...group, proactive: true }, 'png').isError, true);
 });

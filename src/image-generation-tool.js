@@ -54,23 +54,15 @@ export function createImageGenerationTool({
       }
       const estimate = timing.estimate(category);
       startedAt = performance.now();
-      void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
-      let finished = false;
-      const reminder = setTimeout(() => {
-        void notify(job, '这张画得比平时久一些，还在等结果。', 'slow', () => {
-          guard();
-          if (finished) throw Error('绘图已结束');
-        });
-      }, estimate.reminderMs);
-      reminder.unref?.();
+      if (!job.ahead) {
+        void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
+      }
       try {
         result = await generate({ ...request, actor, signal: ctx.abortSignal, referenceImage });
       } catch (error) {
         failure = error;
       } finally {
-        finished = true;
         generatedAt = performance.now();
-        clearTimeout(reminder);
       }
       try {
         ledger.completeImage(hold, { amount: estimateImageCost(request.format, result?.usage ?? failure?.usage), refusal: failure?.refusal === true });
@@ -95,7 +87,6 @@ export function createImageGenerationTool({
       } else if (result.format === 'svg') {
         const name = '绘图-' + id.slice(0, 8) + '.svg';
         await ctx.sender.sendGeneratedFile(ctx.chatKey, result.bytes, name, { guard });
-        await notify(job, `画好了，SVG 文件「${name}」已发到这里。`, 'svg');
       } else {
         const segments = [{ type: 'image', data: { file: 'base64://' + result.bytes.toString('base64') } }];
         if (replyToMessageId) segments.unshift({ type: 'reply', data: { id: replyToMessageId } });
@@ -108,9 +99,12 @@ export function createImageGenerationTool({
         generationMs: generatedAt - startedAt,
         deliveryMs: performance.now() - generatedAt,
       });
-    } catch {
-      log('image job delivery unconfirmed', id, request.format);
-      if (result) await notify(job, '图已生成，QQ 回传没有确认成功。', 'delivery-failed');
+    } catch (error) {
+      const reason = String(error?.message ?? '');
+      const retcode = reason.match(/\bretcode=(-?\d+)/)?.[1];
+      const category = retcode ? `onebot-retcode-${retcode}` : /超时|timeout/i.test(reason) ? 'timeout' : 'send-failed';
+      log('image job delivery unconfirmed', id, request.format, category);
+      if (result) await notify(job, '图片发送未确认。', 'delivery-failed');
     }
   }
 
@@ -181,7 +175,7 @@ export function createImageGenerationTool({
       const actor = String(requestEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
       const id = randomUUID();
       const ahead = busy.size;
-      const job = { ctx, id, request, actor, guard, referenceEntry, replyToMessageId, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() };
+      const job = { ctx, id, request, actor, guard, referenceEntry, replyToMessageId, ahead, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() };
       usedContexts.add(context);
       busy.add(ctx.chatKey);
       waiting.push(job);
