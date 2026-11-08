@@ -213,8 +213,9 @@ export function normalizeCommandCodeResponse(text, { model, status = 200, respon
     if (type === 'tool-call') {
       const id = event.toolCallId ?? event.id, value = block('tool', id, { create: true });
       assert(!value.closed && name(event.toolName) && (!value.name || value.name === event.toolName), 'INVALID_TOOL', 'Command Code tool call is duplicate or contradictory');
-      const args = event.input === undefined ? argumentsObject(value.text) : event.input;
-      assert(object(args), 'INVALID_TOOL', 'Command Code tool input is not an object');
+      const input = event.input ?? value.text;
+      const args = typeof input === 'string' ? argumentsObject(input) : input;
+      assert(object(args), 'INVALID_TOOL', `Command Code tool input is not an object (${Array.isArray(input) ? 'array' : typeof input})`);
       const stable = value => JSON.stringify(value, (_key, child) => object(child) ? Object.fromEntries(Object.entries(child).sort(([a], [b]) => a.localeCompare(b))) : child);
       if (value.text) assert(stable(argumentsObject(value.text)) === stable(args), 'INVALID_TOOL', 'Command Code tool deltas disagree with completed arguments');
       value.name = event.toolName; value.arguments = JSON.stringify(args); value.closed = true; continue;

@@ -117,6 +117,24 @@ test('tool call fragments deduplicate final parsed input and keep each ID/name/J
   assert.equal(result.choices[0].finish_reason, 'tool_calls'); assert.deepEqual(result.choices[0].message.tool_calls.map(call => [call.id, call.function.name, JSON.parse(call.function.arguments)]), [['a', 'first', { a: 1, b: 2 }], ['b', 'second', { text: 'B' }]]);
 });
 
+test('completed tool input accepts a JSON object string and still checks streamed arguments', () => {
+  const prefix = [
+    { type: 'tool-input-start', id: 'a', toolName: 'generate_image' },
+    { type: 'tool-input-delta', id: 'a', delta: '{"prompt":"a cat"}' },
+    { type: 'tool-input-end', id: 'a' },
+  ];
+  const finish = { type: 'finish', finishReason: 'tool-calls' };
+  const call = { type: 'tool-call', toolCallId: 'a', toolName: 'generate_image' };
+  for (const input of ['{"prompt":"a cat"}', null]) {
+    const reply = normalize([...prefix, { ...call, input }, finish]);
+    assert.deepEqual(JSON.parse(reply.choices[0].message.tool_calls[0].function.arguments), { prompt: 'a cat' });
+  }
+  for (const input of ['{"prompt":"a dog"}', '[]', []]) {
+    fails(() => normalize([...prefix, { ...call, input }, finish]), 'INVALID_TOOL');
+  }
+  fails(() => normalize([{ ...call, input: null }, finish]), 'INVALID_TOOL');
+});
+
 test('input is inclusive of cached tokens and reasoning is not added to total output a second time', () => {
   const usage = { inputTokens: 100, outputTokens: 15, totalTokens: 115, cachedInputTokens: 70, inputTokenDetails: { noCacheTokens: 30, cacheReadTokens: 70 }, outputTokenDetails: { reasoningTokens: 9 }, raw: { prompt_tokens: 100, completion_tokens: 15, total_tokens: 115, prompt_cache_hit_tokens: 70, completion_tokens_details: { reasoning_tokens: 9 } } };
   assert.deepEqual(normalize(textEvents({ totalUsage: usage })).usage, { prompt_tokens: 100, completion_tokens: 15, total_tokens: 115, prompt_tokens_details: { cached_tokens: 70 }, completion_tokens_details: { reasoning_tokens: 9 } });
