@@ -1027,12 +1027,14 @@ export function createApp({ log = console.log, speechCredentials = undefined, ho
       maybeTriggerCommandMute(id, text, event, atMe);
     }
 
+    const quotedMid = segments?.find(s => s?.type === 'reply')?.data?.id;
     const entry = store.appendIncoming(`${kind}:${id}`, {
       mid: event.message_id,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
       text: text || '[图片]' ,
+      reply: quotedMid == null ? null : { mid: String(quotedMid) },
       media,
       atMe,
       atNames

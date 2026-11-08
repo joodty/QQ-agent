@@ -9,6 +9,7 @@
 import { getConfig } from './config.js';
 import { speechToolDefinition } from './speech-runtime.js';
 import { configuredImageGenerationTool } from './image-generation-tool.js';
+import { selectTriggerEntry } from './qq-request-media.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
@@ -833,13 +834,14 @@ function registerAllTools() {
   registerTool({
     id: 'set_reminder',
     name: '设置提醒',
-    description: '设置一个定时提醒（闹钟）。到点后机器人会在当前群里主动发一条提醒消息。适用：群友说"X分钟后提醒我"、"明天早上叫我"、"X点提醒我吃饭"。delayMinutes（多少分钟后）和 atTime（具体时间，如"18:30"或"2026-09-12 08:00"）二选一。',
+    description: '用户明确要求时设置一次定时提醒。到点在当前群 @ 发起人，或在当前私聊发消息。可以根据引用的活动日期和时间设置，例如用户引用“周五晚八点开黑”并说“提前半小时提醒我”。根据当前时间把“明天”等换成完整日期。缺具体时间或有歧义时先询问。delayMinutes 和 atTime 二选一。',
     category: 'system',
     icon: '⏰',
     parameters: {
       type: 'object',
       properties: {
         text: { type: 'string', description: '提醒内容（到点要发的话，如"该吃饭了"、"你让提醒你的：开会"）' },
+        requestMessageId: { type: 'string', description: '发起提醒请求的未读消息编号（不带 #，有多条未读时必填）。使用发起人的请求编号。' },
         delayMinutes: { type: 'number', description: '多少分钟后提醒（与 atTime 二选一）' },
         atTime: { type: 'string', description: '具体时间提醒，格式 "HH:MM"（今天/明天）或 "YYYY-MM-DD HH:MM"（与 delayMinutes 二选一）' }
       },
@@ -847,9 +849,12 @@ function registerAllTools() {
     },
     async execute(ctx, args) {
       const text = String(args.text ?? '').trim();
-      if (!text) return err('提醒内容为空');
+      if (!text || text.length > 200) return err('请提供 1–200 字的提醒内容');
+      const request = ctx.proactive ? null : selectTriggerEntry(ctx.triggerEntries, args.requestMessageId);
+      if (!request || request.mid == null) return err('请提供这批未读消息中发起提醒的消息编号。');
+      if ((args.delayMinutes != null) === Boolean(args.atTime)) return err('相对时间和具体时间选一个。');
       let dueAt = null;
-      if (args.delayMinutes != null && Number(args.delayMinutes) > 0) {
+      if (Number.isFinite(args.delayMinutes) && args.delayMinutes > 0) {
         dueAt = Date.now() + Number(args.delayMinutes) * 60000;
       } else if (args.atTime) {
         dueAt = parseAtTime(String(args.atTime));
@@ -858,11 +863,14 @@ function registerAllTools() {
       } else {
         return err('请提供 delayMinutes（多少分钟后）或 atTime（具体时间）之一');
       }
+      if (!Number.isFinite(new Date(dueAt).getTime())) return err('提醒时间超出范围。');
       if (!ctx.reminders) return err('提醒服务未启用');
-      const entry = ctx.reminders.add({ chatKey: ctx.chatKey, text, dueAt, createdBy: String(ctx.selfId || '') });
-      const when = new Date(dueAt);
+      ctx.assertCurrent?.();
+      const entry = ctx.reminders.add({ chatKey: ctx.chatKey, text, dueAt, createdBy: request.senderId, requestMessageId: String(request.mid) });
+      const when = new Date(entry.dueAt);
       const whenStr = `${when.getMonth() + 1}月${when.getDate()}日 ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`;
-      return ok({ set: true, id: entry.id, dueAt, note: `已设置提醒：${whenStr} 到点我会在本群说「${text}」。` });
+      const delivery = ctx.chatKey.startsWith('group:') ? '在本群 @ 发起人' : '发到当前私聊';
+      return ok({ set: true, id: entry.id, dueAt: entry.dueAt, note: `已设置提醒：${whenStr} 到点我会${delivery}：「${text}」。` });
     }
   });
 
@@ -894,15 +902,21 @@ function registerAllTools() {
     icon: '🗑️',
     parameters: {
       type: 'object',
-      properties: { id: { type: 'string', description: '要取消的提醒 id（list_reminders 里 [r_xxx] 那个）' } },
+      properties: {
+        id: { type: 'string', description: '要取消的提醒 id（list_reminders 里 [r_xxx] 那个）' },
+        requestMessageId: { type: 'string', description: '发起取消请求的未读消息编号（不带 #，有多条未读时必填）。' }
+      },
       required: ['id']
     },
     async execute(ctx, args) {
       if (!ctx.reminders) return err('提醒服务未启用');
       const id = String(args.id ?? '').trim();
       if (!id) return err('请提供提醒 id');
-      const ok_ = ctx.reminders.cancel(id);
-      return ok_ ? ok({ cancelled: true, id }) : err(`没找到提醒 ${id}（可能已触发或 id 不对，用 list_reminders 查一下）`);
+      const request = ctx.proactive ? null : selectTriggerEntry(ctx.triggerEntries, args.requestMessageId);
+      if (!request) return err('请提供这批未读消息中发起取消的消息编号。');
+      ctx.assertCurrent?.();
+      const ok_ = ctx.reminders.cancel(id, ctx.chatKey, request.senderId);
+      return ok_ ? ok({ cancelled: true, id }) : err('当前会话没有这条可由发起人取消的待触发提醒。');
     }
   });
 

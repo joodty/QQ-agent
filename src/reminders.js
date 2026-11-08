@@ -32,7 +32,12 @@ export class ReminderStore {
   }
 
   /** 新增一条提醒。返回该提醒。 */
-  add({ chatKey, text, dueAt, createdBy = '' }) {
+  add({ chatKey, text, dueAt, createdBy = '', requestMessageId = null }) {
+    if (requestMessageId != null) {
+      const existing = this.reminders.find(r => r.chatKey === chatKey && r.createdBy === createdBy &&
+        r.requestMessageId === requestMessageId && r.text === text);
+      if (existing) return existing;
+    }
     const entry = {
       id: `r_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`,
       chatKey: String(chatKey),
@@ -40,6 +45,7 @@ export class ReminderStore {
       dueAt: Number(dueAt),
       createdAt: Date.now(),
       createdBy: String(createdBy ?? ''),
+      requestMessageId,
       fired: false
     };
     this.reminders.push(entry);
@@ -70,14 +76,12 @@ export class ReminderStore {
   }
 
   /** 取消一条提醒（按 id）。返回是否取消成功。 */
-  cancel(id) {
-    const before = this.reminders.length;
-    this.reminders = this.reminders.filter((x) => x.id !== id);
-    if (this.reminders.length < before) {
-      save(this.reminders);
-      return true;
-    }
-    return false;
+  cancel(id, chatKey, requester) {
+    const entry = this.pending(chatKey).find(r => r.id === id && (r.requestMessageId == null || r.createdBy === requester));
+    if (!entry) return false;
+    this.reminders = this.reminders.filter(r => r !== entry);
+    save(this.reminders);
+    return true;
   }
 
   /** 清理已触发很久的旧提醒（保留最近 200 条已触发的，防文件无限增长）。 */

@@ -251,7 +251,8 @@ export class SendQueue {
         if (gap > 0) await sleep(gap);
         this.#guard(chatKey, selection, options.guard);
         // 发送去重：窗口期内 identical 文本跳过（防模型重复调用/超时重试造成的重复发言）
-        if (this.#isDuplicate(chatKey, text)) {
+        const dedupeText = i === 0 && options.atUserId ? `__at__${options.atUserId}:${text}` : text;
+        if (this.#isDuplicate(chatKey, dedupeText)) {
           console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
           return { text, messageId: null, at: formatClockTime(Date.now()), deduped: true };
         }
@@ -259,7 +260,7 @@ export class SendQueue {
           replyToMessageId: i === 0 ? options.replyToMessageId : null, // 引用挂在第一条上：回的就是那条
           atUserId: i === 0 ? options.atUserId : null
         });
-        this.#markSent(chatKey, text);   // 只有 OneBot 成功返回后才记入去重窗口
+        this.#markSent(chatKey, dedupeText);   // 只有 OneBot 成功返回后才记入去重窗口
         const ts = Date.now();
         this.#record(chatKey, { text, ts, mid: data?.message_id ?? null }, selection);
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });

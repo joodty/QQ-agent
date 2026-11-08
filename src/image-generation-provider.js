@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { detectImageType } from './image-type.js';
 
 export const IMAGE_MODEL = 'gpt-image-2.6-flare';
-const endpoint = 'https://api.openai.com/v1/images/generations';
+const endpoint = 'https://api.openai.com/v1/images/';
 const maxBytes = 8 * 1024 * 1024;
 // Use an accounting conversion, rather than claiming the invoice FX rate.
 const cnyPerUsd = 7.5;
@@ -37,13 +37,14 @@ export function normalizeImageRequest(args) {
 }
 
 export function createOpenAiImageProvider({ apiKey, fetchImpl = fetch, sanitize = sanitizeSvg }) {
-  return async ({ prompt, format, size, frames, frameMs, actor, signal }) => {
-    const response = await fetchImpl(endpoint, {
+  return async ({ prompt, format, size, frames, frameMs, actor, signal, referenceImage }) => {
+    const response = await fetchImpl(endpoint + (referenceImage ? 'edits' : 'generations'), {
       method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(150_000)].filter(Boolean)),
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: IMAGE_MODEL, prompt, n: 1, output_format: format, quality: 'low', complexity: 'low',
         size,
+        ...(referenceImage ? { images: [{ image_url: referenceImage }] } : {}),
         ...(format === 'gif' ? { frame_count: frames, frame_duration_ms: frameMs } : {}),
         ...(format === 'svg' ? { svg: { model: 'gpt-5.4-mini' } } : {}),
         safety_identifier: createHash('sha256').update(actor).digest('hex'),

@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { currentConversationContext } from './conversation-context.js';
 import { capturePaidAuthority, assertPaidAuthority, productionPaidCallGuard } from './paid-call-guard.js';
 import { createOpenAiImageProvider, IMAGE_MODEL, normalizeImageRequest, estimateImageCost } from './image-generation-provider.js';
+import { loadReferenceImage, selectTriggerEntry } from './qq-request-media.js';
 
 const quotes = { png: 0.5, gif: 4, svg: 3 };
 const maxJobs = 8;
 
 export function createImageGenerationTool({
   generate, paidGuard = productionPaidCallGuard, captureAuthority = capturePaidAuthority,
-  assertAuthority = assertPaidAuthority, log = console.warn,
+  assertAuthority = assertPaidAuthority, log = console.warn, loadReference = loadReferenceImage,
 }) {
   const waiting = [];
   const busy = new Set();
@@ -19,10 +20,15 @@ export function createImageGenerationTool({
   let running = false;
 
   async function generateAndDeliver(job) {
-    const { ctx, request, id, guard, actor } = job;
-    let hold, ledger, result, failure;
+    const { ctx, request, id, guard, actor, referenceEntry } = job;
+    let hold, ledger, result, failure, referenceImage, referenceFailed = false;
     try {
       guard();
+      if (referenceEntry) {
+        try { referenceImage = await loadReference(ctx, referenceEntry); }
+        catch (error) { referenceFailed = true; throw error; }
+        guard();
+      }
       ledger = paidGuard();
       hold = ledger.prepareImage({ operationId: id, amountCny: quotes[request.format], model: IMAGE_MODEL });
       try {
@@ -32,7 +38,7 @@ export function createImageGenerationTool({
         throw error;
       }
       try {
-        result = await generate({ ...request, actor, signal: ctx.abortSignal });
+        result = await generate({ ...request, actor, signal: ctx.abortSignal, referenceImage });
       } catch (error) {
         failure = error;
       }
@@ -49,7 +55,8 @@ export function createImageGenerationTool({
       if (!result) {
         log('image job failed before delivery', id, request.format, failure?.status ?? '-', failure?.providerCode ?? '-');
         let message = '这次绘图没完成，可以稍后再试。';
-        if (!hold) message = '当前会话的额度或授权无法开始绘图。';
+        if (referenceFailed) message = '没能取得一张可用的参考图，请重新发一张 PNG、JPG 或 WebP 图片。';
+        else if (!hold) message = '当前会话的额度或授权无法开始绘图。';
         else if (failure?.providerCode === 'insufficient_quota') message = '绘图账户的 API 额度不足。';
         else if (failure?.status === 429) message = '绘图服务正在限流，过一会儿再试。';
         else if (['content_policy_violation', 'moderation_blocked', 'safety_violations'].includes(failure?.providerCode)) message = '绘图服务拦截了这次描述，可以换个画面再试。';
@@ -84,11 +91,13 @@ export function createImageGenerationTool({
 
   return {
     id: 'generate_image', name: '绘图', category: 'messaging', icon: '🎨',
-    description: '用户明确要求画图时调用。后台生成 PNG 普通图、GIF 动图或 SVG 矢量文件，完成后自动发回当前 QQ 会话。提交成功后只需简短告知已排队，可继续聊天。一次请求调用一次。',
+    description: '用户明确要求画图时调用。改原图或根据参考图画新图时，务必传 reference=true，使用请求消息附图或它明确引用的那张图，输出 PNG。纯文字生成支持 PNG、GIF、SVG。后台完成后自动发回原 QQ 会话，一次请求调用一次。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['prompt'],
       properties: {
         prompt: { type: 'string', description: '用户要画的内容和画风' },
+        reference: { type: 'boolean', description: '改图或图生图传 true，工具会读取真实图片。取图失败时请用户重发。' },
+        requestMessageId: { type: 'string', description: '发出这次绘图请求的未读消息 #数字（不带 #）。同批有多条消息时改图必填。不要填被引用的原消息编号。' },
         format: { type: 'string', enum: ['png', 'gif', 'svg'], description: '默认 png。动图用 gif，矢量图用 svg' },
         size: { type: 'string', description: '可选。普通图和 SVG 用 1024x1024、1536x1024 或 1024x1536，GIF 默认 512x512' },
         frames: { type: 'integer', minimum: 2, maximum: 16, description: '可选，仅 GIF，默认 9 帧' },
@@ -109,6 +118,12 @@ export function createImageGenerationTool({
       } catch (error) {
         return denied(error.message);
       }
+      const referenceEntry = args?.reference === true ? selectTriggerEntry(ctx.triggerEntries, args.requestMessageId) : null;
+      if (args?.reference === true && request.format !== 'png') return denied('参考图编辑当前输出 PNG。');
+      if (args?.reference === true && !referenceEntry) return denied('请用这批未读消息里的绘图请求编号定位参考图。');
+      if (referenceEntry && !referenceEntry.reply?.mid && !referenceEntry.media?.some(item => item.kind === 'image')) {
+        return denied('请发一张图，或引用那张图再说要怎么改。');
+      }
       try {
         ctx.assertCurrent();
         authority = captureAuthority(ctx.chatKey);
@@ -119,11 +134,11 @@ export function createImageGenerationTool({
         ctx.assertCurrent();
         assertAuthority(ctx.chatKey, authority);
       };
-      const actor = String(ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
+      const actor = String(referenceEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
       const id = randomUUID();
       usedContexts.add(context);
       busy.add(ctx.chatKey);
-      waiting.push({ ctx, id, request, actor, guard, run: AsyncLocalStorage.snapshot() });
+      waiting.push({ ctx, id, request, actor, guard, referenceEntry, run: AsyncLocalStorage.snapshot() });
       setImmediate(() => drain().catch(() => log('image queue interrupted')));
       return { content: '绘图已排队，完成后会发回这里。' };
     }

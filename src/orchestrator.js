@@ -1387,7 +1387,7 @@ export class Orchestrator {
     const tick = async () => {
       if (this.aborted) return;
       try {
-        const dueList = this.reminders.due(Date.now());
+        const dueList = this.paused ? [] : this.reminders.due(Date.now());
         for (const r of dueList) {
           if (this.reminderFiring.has(r.id)) continue;
           this.reminderFiring.add(r.id);
@@ -1424,7 +1424,9 @@ export class Orchestrator {
     // 并自带留档（appendSelf）。原先直接调 onebot.sendText 会绕过这四项 ——
     // 表现为提醒与正常发言并发抢发、限频计数不到它、超长提醒被协议端截断。
     // 失败必须向上抛，让调度循环保留未触发状态以便重试。
-    await this.sender.sendTextBatch(r.chatKey, [text]).then((result) => {
+    const atUserId = kind === 'group' && r.requestMessageId != null && /^[1-9]\d*$/.test(r.createdBy) ? r.createdBy : null;
+    const guard = () => !this.paused && !this.aborted && this.reminders.pending(r.chatKey).some(entry => entry.id === r.id);
+    await this.sender.sendTextBatch(r.chatKey, [text], { atUserId, guard }).then((result) => {
       // 极端边界：同一会话 8 秒窗口内两条文本完全相同的提醒，第二条会被发送去重
       // 拦下（sendTextBatch 正常返回但 deduped）。留个日志，别无声消失。
       if (result?.sent?.some((s) => s?.deduped)) {
