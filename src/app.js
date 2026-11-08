@@ -11,6 +11,7 @@ import { getConfig, updateConfig, ROOT, DATA_DIR, setArchivePersonaResolver } fr
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { isAtMe } from './prompt.js';
 import { quotedVoiceInChat, selectVoiceInput, transcribeQqVoice } from './qq-voice-input.js';
+import { createXNotificationRelay, readXNotificationSettings, X_NOTIFICATION_PATH } from './x-notification-relay.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
 import { scopeArchiveMemory } from './archive-runtime.js';
@@ -1474,9 +1475,38 @@ export function createApp({ log = console.log, speechCredentials = undefined, ho
     usage: platformAuth ? createSpeechUsage({ file: path.join(DATA_DIR, 'paid-calls.sqlite'), auth: platformAuth }) : null
   }));
 
+  const xSettings = platformAuth && !hostedWorker ? readXNotificationSettings(process.env.CREDENTIALS_DIRECTORY) : null;
+  const xRelay = xSettings ? createXNotificationRelay({
+    settings: xSettings, file: path.join(DATA_DIR, 'x-notification-relay.sqlite'),
+    ownerChat(accountId) {
+      const account = platformAuth.store.account(accountId);
+      const binding = platformAuth.store.binding(accountId);
+      const cfg = getConfig();
+      if (account?.role !== 'admin' || account.disabled || !binding || !onebot.connected || orchestrator.paused ||
+          cfg.botControls?.enabled === false || cfg.botControls?.privateReplies === false ||
+          (cfg.deny?.private || []).map(String).includes(binding.qq)) return null;
+      return 'private:' + binding.qq;
+    },
+    deliver(chatKey, message, options) {
+      return sender.sendManualText(chatKey, message, {
+        ...options, capability: manualMessageCapability, selection: store.captureArchive?.(chatKey)
+      });
+    }
+  }) : null;
+
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
+    if (pathname === X_NOTIFICATION_PATH) {
+      if (!xRelay || req.method !== 'POST') return json(res, 404, { error: '接口不存在' });
+      if (!xRelay.authorized(req.headers.authorization)) return json(res, 401, { error: '未授权' });
+      try {
+        const { status, duplicate } = await xRelay.accept(await readBody(req, { maxBytes: 4096 }));
+        return json(res, status, { ok: status === 200, ...(duplicate ? { duplicate } : {}) });
+      } catch (error) {
+        return json(res, error.status || 503, { error: '通知处理失败' });
+      }
+    }
     if(catalogueAsset(req,res,url))return;
     if(pathname.startsWith('/api/hosted/')){
       if(!hostedWorker)return json(res,404,{error:'接口不存在'});
@@ -1877,6 +1907,7 @@ export function createApp({ log = console.log, speechCredentials = undefined, ho
     await orchestrator.whenArchiveIdle?.();
     await sender.whenIdle?.();
     await manualMessagesClosing;
+    xRelay?.close();
     speechService?.close();
     platformBusiness?.close();
     platformAuth?.close();
