@@ -311,6 +311,41 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
           configFingerprint: fundingFingerprint(p, context.conversationKey) };
       });
     },
+    prepareImage({ operationId, amountCny, model }) {
+      if (!money(amountCny) || amountCny <= 0) throw error('生图报价无效');
+      return storage.transaction(() => {
+        const context = currentConversationContext();
+        const p = authorize(config(), context);
+        sync(p);
+        const key = context.conversationKey;
+        const ledgers = [[budget, key], [p.source.mode === 'trial' ? trial(p) : null, 'private:1'], [total(p), 'private:1']];
+        const holds = ledgers.map(([ledger, scope], index) => {
+          if (!ledger) return null;
+          const status = ledger.status(scope);
+          if (status.action !== 'normal' || status.enabled && status.spentCny + status.reservedCny + amountCny >= status.dailyLimitCny * 0.8) {
+            throw error('预算达到节流阈值，已暂停生图');
+          }
+          const hold = ledger.reserve(scope, { operationId: 'image:' + operationId + ':' + index, estimatedMaxCost: amountCny, quote: { currency: 'CNY', complete: true } });
+          if (!hold.allowed) throw error('剩余预算不足，已暂停生图');
+          return hold.id;
+        });
+        const [id, trialHoldId, totalHoldId] = holds;
+        const raw = storage.readText('call-attribution'), rows = raw === null ? {} : JSON.parse(raw);
+        rows[id] = { key, kind: 'image', provider: 'openai', model, mode: p.source.mode, ownerId: p.source.ownerId || null, credentialRef: null };
+        storage.writeText('call-attribution', JSON.stringify(rows), raw);
+        return { id, trialHoldId, totalHoldId, key, requestId: context.requestId, sourceId: p.source.id, sourceVersion: p.source.version,
+          configFingerprint: fundingFingerprint(p, key), degraded: false, purpose: 'image' };
+      });
+    },
+    completeImage(token, { amount, refusal }) {
+      if (!refusal && !money(amount)) return this.unknown(token, 'image_usage_unavailable');
+      return storage.transaction(() => {
+        const ledgers = [[budget, token.id], [token.trialHoldId ? trial(effectivePolicy(config())) : null, token.trialHoldId], [totalBudget, token.totalHoldId]];
+        return ledgers.filter(([, id]) => id).map(([ledger, id]) => refusal
+          ? ledger.release(id, { confirmedNotCharged: true })
+          : ledger.settle(id, { amount, currency: 'CNY' }))[0];
+      });
+    },
     dispatch(token) {
       return storage.transaction(() => {
         const p = authorize(config(), currentConversationContext()); sync(p);

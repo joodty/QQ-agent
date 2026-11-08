@@ -41,6 +41,30 @@ function fixture(t) {
   };
 }
 
+test('image work shares spending scope and preserves unresolved charges across reloads', t => {
+  const f = fixture(t);
+  const image = (operationId, amountCny) => f.guard.prepareImage({ operationId, amountCny, model: 'fixture-image' });
+  assert.throws(() => image('no-chat', .2), { code: 'PAID_CALL_DENIED' });
+  assert.throws(() => inContext(() => image('too-high', .9)), { code: 'PAID_CALL_DENIED' });
+  inContext(() => {
+    const paid = image('paid', .3);
+    f.guard.dispatch(paid);
+    f.guard.completeImage(paid, { amount: .15 });
+    const rejected = image('rejected', .1);
+    f.guard.dispatch(rejected);
+    f.guard.completeImage(rejected, { amount: null, refusal: true });
+    const unknown = image('unknown', .2);
+    f.guard.dispatch(unknown);
+    f.guard.completeImage(unknown, { amount: null });
+    assert.equal(f.guard.attributions()[paid.id].provider, 'openai');
+  });
+  f.rebuild();
+  assert.equal(f.guard.status('group:123').spentCny, .15);
+  assert.equal(f.guard.status('group:123').reservedCny, .2);
+  assert.equal(f.guard.status('private:123').spentCny, 0);
+  assert.throws(() => inContext(() => image('outside', .1), 'group:999'), { code: 'PAID_CALL_DENIED' });
+});
+
 test('unlimited spending preserves accounting and authorization and can restore the original limits', t => {
   const f = fixture(t); f.cfg.productionBudget.enforceLimits = false;
   f.cfg.productionBudget.overrides['group:123'] = .001;

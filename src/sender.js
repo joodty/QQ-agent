@@ -442,6 +442,25 @@ export class SendQueue {
     });
   }
 
+  sendGeneratedFile(chatKey, bytes, name, options = {}) {
+    const selection = this.#capture(chatKey);
+    const [kind, id] = chatKey.split(':');
+    return this.#chain(chatKey)(async () => {
+      this.#guard(chatKey, selection, options.guard);
+      this.#checkRate(chatKey);
+      const result = await this.onebot.call(kind === 'group' ? 'upload_group_file' : 'upload_private_file', {
+        [kind === 'group' ? 'group_id' : 'user_id']: Number(id),
+        file: 'base64://' + bytes.toString('base64'),
+        name
+      }, 60_000);
+      const label = '[文件] ' + name;
+      this.#markSent(chatKey, label);
+      this.#record(chatKey, { text: label, ts: Date.now(), mid: null }, selection);
+      this.onSent?.({ chatKey, text: label, messageId: null, kind: 'media' });
+      return result;
+    });
+  }
+
   /**
    * 发送一批媒体段（视频 / 一次多图）—— 走完整发送管道：串行 → 限频 → 去重 → 留档。
    *

@@ -8,6 +8,7 @@
 // 支持在设置页按卡片勾选启用/禁用。
 import { getConfig } from './config.js';
 import { speechToolDefinition } from './speech-runtime.js';
+import { configuredImageGenerationTool } from './image-generation-tool.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { skillManager } from './skills/manager.js';
@@ -154,9 +155,12 @@ function loadPluginTools() {
   // 这里只需要确保 registry 里有它们
 }
 
+const imageGeneration = configuredImageGenerationTool();
+
 /** 注册所有内置工具到 registry。 */
 function registerAllTools() {
   registerTool(speechToolDefinition);
+  if (imageGeneration) registerTool(imageGeneration);
   // 消息发送类
   registerTool({
     id: 'send_message',
