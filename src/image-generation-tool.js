@@ -2,10 +2,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DATA_DIR } from './config.js';
 import { currentConversationContext } from './conversation-context.js';
 import { capturePaidAuthority, assertPaidAuthority, productionPaidCallGuard } from './paid-call-guard.js';
 import { createOpenAiImageProvider, IMAGE_MODEL, normalizeImageRequest, estimateImageCost } from './image-generation-provider.js';
 import { loadReferenceImage, selectTriggerEntry } from './qq-request-media.js';
+import { createImageGenerationTiming } from './image-generation-timing.js';
 
 const quotes = { png: 0.5, gif: 4, svg: 3 };
 const maxJobs = 8;
@@ -13,6 +15,7 @@ const maxJobs = 8;
 export function createImageGenerationTool({
   generate, paidGuard = productionPaidCallGuard, captureAuthority = capturePaidAuthority,
   assertAuthority = assertPaidAuthority, log = console.warn, loadReference = loadReferenceImage,
+  timing = createImageGenerationTiming(),
 }) {
   const waiting = [];
   const busy = new Set();
@@ -20,7 +23,18 @@ export function createImageGenerationTool({
   let running = false;
 
   async function generateAndDeliver(job) {
-    const { ctx, request, id, guard, actor, referenceEntry } = job;
+    const { ctx, request, id, guard, actor, referenceEntry, replyToMessageId, queuedAt } = job;
+    const dequeuedAt = performance.now();
+    const category = request.format === 'png' && referenceEntry ? 'reference' : request.format;
+    const replyOptions = { guard, replyToMessageId };
+    async function notify(text, stage, check = guard) {
+      try {
+        await ctx.sender.sendTextBatch(ctx.chatKey, [text], {
+          ...replyOptions, guard: check, dedupeKey: `image:${id}:${stage}`,
+        });
+      } catch { log('image status delivery skipped', id, stage); }
+    }
+    let startedAt, generatedAt;
     let hold, ledger, result, failure, referenceImage, referenceFailed = false;
     try {
       guard();
@@ -37,10 +51,25 @@ export function createImageGenerationTool({
         ledger.release(hold);
         throw error;
       }
+      const estimate = timing.estimate(category);
+      startedAt = performance.now();
+      void notify(estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
+      let finished = false;
+      const reminder = setTimeout(() => {
+        void notify('这张画得比平时久一些，还在等结果。', 'slow', () => {
+          guard();
+          if (finished) throw Error('绘图已结束');
+        });
+      }, estimate.reminderMs);
+      reminder.unref?.();
       try {
         result = await generate({ ...request, actor, signal: ctx.abortSignal, referenceImage });
       } catch (error) {
         failure = error;
+      } finally {
+        finished = true;
+        generatedAt = performance.now();
+        clearTimeout(reminder);
       }
       try {
         ledger.completeImage(hold, { amount: estimateImageCost(request.format, result?.usage ?? failure?.usage), refusal: failure?.refusal === true });
@@ -61,17 +90,26 @@ export function createImageGenerationTool({
         else if (failure?.status === 429) message = '绘图服务正在限流，过一会儿再试。';
         else if (['content_policy_violation', 'moderation_blocked', 'safety_violations'].includes(failure?.providerCode)) message = '绘图服务拦截了这次描述，可以换个画面再试。';
         else if (failure?.status) message = `绘图服务拒绝了这次请求（HTTP ${failure.status}）。`;
-        await ctx.sender.sendTextBatch(ctx.chatKey, [message], { guard });
+        await notify(message, 'failed');
       } else if (result.format === 'svg') {
-        await ctx.sender.sendGeneratedFile(ctx.chatKey, result.bytes, '绘图-' + id.slice(0, 8) + '.svg', { guard });
+        const name = '绘图-' + id.slice(0, 8) + '.svg';
+        await ctx.sender.sendGeneratedFile(ctx.chatKey, result.bytes, name, { guard });
+        await notify(`画好了，SVG 文件「${name}」已发到这里。`, 'svg');
       } else {
-        await ctx.sender.sendMedia(ctx.chatKey, [{ type: 'image', data: { file: 'base64://' + result.bytes.toString('base64') } }], {
+        const segments = [{ type: 'image', data: { file: 'base64://' + result.bytes.toString('base64') } }];
+        if (replyToMessageId) segments.unshift({ type: 'reply', data: { id: replyToMessageId } });
+        await ctx.sender.sendMedia(ctx.chatKey, segments, {
           guard, dedupeKey: id, label: result.format === 'gif' ? '[绘图 GIF]' : '[绘图 PNG]'
         });
       }
+      if (result) timing.record(category, {
+        queueMs: dequeuedAt - queuedAt,
+        generationMs: generatedAt - startedAt,
+        deliveryMs: performance.now() - generatedAt,
+      });
     } catch {
       log('image job delivery unconfirmed', id, request.format);
-      if (result) await Promise.resolve().then(() => ctx.sender.sendTextBatch(ctx.chatKey, ['图已生成，QQ 回传没有确认成功。'], { guard })).catch(() => {});
+      if (result) await notify('图已生成，QQ 回传没有确认成功。', 'delivery-failed');
     }
   }
 
@@ -91,13 +129,13 @@ export function createImageGenerationTool({
 
   return {
     id: 'generate_image', name: '绘图', category: 'messaging', icon: '🎨',
-    description: '用户明确要求画图时调用。改原图、按参考图画新图或让静态图动起来时，传 reference=true，使用请求消息的附图或明确引用的图。静态改图用 format=png，让原图动起来用 format=gif，并在描述里写清动作。纯文字生成支持 PNG、GIF、SVG。后台完成后自动发回原 QQ 会话。',
+    description: '用户明确要求画图时调用。改原图、按参考图画新图或让静态图动起来时，传 reference=true，使用请求消息的附图或明确引用的图。静态改图用 format=png，让原图动起来用 format=gif，并在描述里写清动作。纯文字生成支持 PNG、GIF、SVG。后台会自动发开工通知和成图，无需另发确认。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['prompt'],
       properties: {
         prompt: { type: 'string', description: '用户要画的内容和画风' },
         reference: { type: 'boolean', description: '用原图改图或做 GIF 时传 true，读取真实图片。取图失败时请用户重发。' },
-        requestMessageId: { type: 'string', description: '发出这次绘图请求的未读消息 #数字（不带 #）。同批有多条消息时改图必填。不要填被引用的原消息编号。' },
+        requestMessageId: { type: 'string', description: '发出这次绘图请求的未读消息 #数字（不带 #）。同批有多条消息时必填。不要填被引用的图片消息编号。' },
         format: { type: 'string', enum: ['png', 'gif', 'svg'], description: '默认 png。动图用 gif，矢量图用 svg' },
         size: { type: 'string', description: '可选。普通图和 SVG 用 1024x1024、1536x1024 或 1024x1536，GIF 默认 512x512' },
         frames: { type: 'integer', minimum: 2, maximum: 16, description: '可选，仅 GIF，默认 9 帧' },
@@ -118,7 +156,12 @@ export function createImageGenerationTool({
       } catch (error) {
         return denied(error.message);
       }
-      const referenceEntry = args?.reference === true ? selectTriggerEntry(ctx.triggerEntries, args.requestMessageId) : null;
+      const requestEntry = selectTriggerEntry(ctx.triggerEntries, args.requestMessageId);
+      const replyToMessageId = /^-?[1-9]\d*$/.test(String(requestEntry?.mid)) ? String(requestEntry.mid) : null;
+      if ((args.requestMessageId != null || ctx.triggerEntries.length > 1) && !replyToMessageId) {
+        return denied('请填写发出绘图请求的未读消息编号，画完后会回复那条消息。');
+      }
+      const referenceEntry = args?.reference === true ? requestEntry : null;
       if (args?.reference === true && request.format === 'svg') return denied('参考图可以输出 PNG 或 GIF。SVG 当前支持从文字生成。');
       if (args?.reference === true && !referenceEntry) return denied('请用这批未读消息里的绘图请求编号定位参考图。');
       if (referenceEntry && !referenceEntry.reply?.mid && !referenceEntry.media?.some(item => item.kind === 'image')) {
@@ -134,11 +177,11 @@ export function createImageGenerationTool({
         ctx.assertCurrent();
         assertAuthority(ctx.chatKey, authority);
       };
-      const actor = String(referenceEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
+      const actor = String(requestEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
       const id = randomUUID();
       usedContexts.add(context);
       busy.add(ctx.chatKey);
-      waiting.push({ ctx, id, request, actor, guard, referenceEntry, run: AsyncLocalStorage.snapshot() });
+      waiting.push({ ctx, id, request, actor, guard, referenceEntry, replyToMessageId, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() });
       setImmediate(() => drain().catch(() => log('image queue interrupted')));
       return { content: '绘图已排队，完成后会发回这里。' };
     }
@@ -150,5 +193,8 @@ export function configuredImageGenerationTool() {
   let apiKey;
   try { apiKey = readFileSync(join(process.env.CREDENTIALS_DIRECTORY, 'openai-image-key'), 'utf8').trim(); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  return apiKey ? createImageGenerationTool({ generate: createOpenAiImageProvider({ apiKey }) }) : null;
+  return apiKey ? createImageGenerationTool({
+    generate: createOpenAiImageProvider({ apiKey }),
+    timing: createImageGenerationTiming({ file: join(DATA_DIR, 'image-generation-timing.json') }),
+  }) : null;
 }

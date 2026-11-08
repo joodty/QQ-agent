@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runWithConversationContext, currentConversationContext } from '../src/conversation-context.js';
 import { createOpenAiImageProvider, normalizeImageRequest } from '../src/image-generation-provider.js';
 import { createImageGenerationTool } from '../src/image-generation-tool.js';
+import { createImageGenerationTiming } from '../src/image-generation-timing.js';
 import { SendQueue } from '../src/sender.js';
 
 const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
@@ -57,7 +61,7 @@ test('a quoted reference can become a GIF with user-selected playback options', 
     chatKey: 'group:101', assertCurrent() {}, triggerEntries: [{ mid: '1', senderId: '7', reply: { mid: '-2' } }],
     sender: {
       async sendMedia(chatKey, segments) { events.emit('delivery', { chatKey, segments }); },
-      async sendTextBatch(_chatKey, messages) { events.emit('delivery', { messages }); }
+      async sendTextBatch(_chatKey, messages, options) { events.emit('progress', { messages, reply: options.replyToMessageId }); }
     }
   };
   const generate = createOpenAiImageProvider({ apiKey: 'fake', async fetchImpl(endpoint, { body }) {
@@ -79,23 +83,98 @@ test('a quoted reference can become a GIF with user-selected playback options', 
   });
   assert.equal(submit(tool, ctx, 'svg', { reference: true }).isError, true);
   const delivery = once(events, 'delivery', { signal: AbortSignal.timeout(3000) });
+  const progress = once(events, 'progress', { signal: AbortSignal.timeout(3000) });
   assert.match(submit(tool, ctx, 'gif', { reference: true, frames: 4, frameMs: 180 }).content, /已排队/);
+  assert.deepEqual(await progress, [{ messages: ['开始画了。'], reply: '1' }]);
   assert.deepEqual(await delivery, [{
-    chatKey: 'group:101', segments: [{ type: 'image', data: { file: 'base64://' + gif.toString('base64') } }]
+    chatKey: 'group:101', segments: [
+      { type: 'reply', data: { id: '1' } },
+      { type: 'image', data: { file: 'base64://' + gif.toString('base64') } },
+    ]
   }]);
+});
+
+test('estimates require five successful samples per category and survive restart', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'qq-image-timing-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'timing.json');
+  const timing = createImageGenerationTiming({ file });
+  for (const generationMs of [10_000, 20_000, 30_000, 40_000]) {
+    timing.record('reference', { queueMs: 180_000, generationMs, deliveryMs: 1000 });
+  }
+  assert.deepEqual(timing.estimate('reference'), { reminderMs: 60_000 });
+  timing.record('reference', { queueMs: 180_000, generationMs: 50_000, deliveryMs: 1000 });
+  const reopened = createImageGenerationTiming({ file });
+  assert.deepEqual(reopened.estimate('reference'), { seconds: '35～45', reminderMs: 45_000 });
+  for (const category of ['png', 'svg', 'gif']) {
+    assert.deepEqual(reopened.estimate(category), { reminderMs: 60_000 });
+  }
+});
+
+test('uses the requested message and sends only one overdue update before delivering PNG', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events = new EventEmitter();
+  const progress = [];
+  const samples = [];
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  const tool = createImageGenerationTool({
+    captureAuthority: () => ({}), assertAuthority() {},
+    paidGuard: () => ({ prepareImage: args => args, dispatch() {}, completeImage() {} }),
+    timing: {
+      estimate(category) { assert.equal(category, 'png'); return { seconds: '5～10', reminderMs: 10_000 }; },
+      record(category, duration) { samples.push({ category, duration }); },
+    },
+    async generate() { await gate; return { format: 'png', bytes: png }; },
+  });
+  const ctx = {
+    chatKey: 'private:7', assertCurrent() {},
+    triggerEntries: [{ mid: '-3', senderId: '7' }, { mid: '4', senderId: '7' }],
+    sender: {
+      async sendTextBatch(_key, [message], { replyToMessageId, guard }) {
+        guard();
+        assert.equal(replyToMessageId, '-3');
+        progress.push(message);
+        events.emit('progress');
+      },
+      async sendMedia(_key, segments) {
+        assert.deepEqual(segments.map(segment => segment.type), ['reply', 'image']);
+        assert.equal(segments[0].data.id, '-3');
+        events.emit('delivery');
+      },
+    },
+  };
+  assert.equal(submit(tool, ctx, 'png').isError, true);
+  assert.equal(submit(tool, ctx, 'png', { requestMessageId: '999' }).isError, true);
+  const started = once(events, 'progress');
+  assert.match(submit(tool, ctx, 'png', { requestMessageId: '-3' }).content, /已排队/);
+  await started;
+  t.mock.timers.tick(9999);
+  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
+  t.mock.timers.tick(1);
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。', '这张画得比平时久一些，还在等结果。']);
+  const delivered = once(events, 'delivery');
+  finish();
+  await delivered;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].category, 'png');
+  assert.ok(Object.values(samples[0].duration).every(ms => ms >= 0));
 });
 
 test('acknowledges immediately, deduplicates, and delivers through the original chat with isolated funding context', async () => {
   const events = new EventEmitter();
   const settlements = [];
   const delivered = [];
+  const notices = [];
   const funding = [];
   let unblock;
   const gate = new Promise(resolve => { unblock = resolve; });
   const sender = new SendQueue({
     onebot: {
       async sendSegments(kind, id, segments) {
-        delivered.push([kind, id, segments[0].data.file]);
+        delivered.push([kind, id, segments]);
         events.emit('delivery');
         return { message_id: 1 };
       },
@@ -103,7 +182,11 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
         delivered.push([action, params.user_id, params.file]);
         events.emit('delivery');
         return { file_id: 'file' };
-      }
+      },
+      async sendText(kind, id, message, { replyToMessageId }) {
+        notices.push([kind, id, message, replyToMessageId]);
+        return { message_id: 2 };
+      },
     },
     store: { appendSelf() {} },
   });
@@ -116,8 +199,8 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
     }),
     async generate({ format }) { await gate; return { format, bytes: format === 'gif' ? gif : svg }; }
   });
-  const group = { chatKey: 'group:101', triggerEntries: [{ senderId: '7' }], sender, assertCurrent() {} };
-  const privateChat = { ...group, chatKey: 'private:202' };
+  const group = { chatKey: 'group:101', triggerEntries: [{ mid: '9', senderId: '7' }], sender, assertCurrent() {} };
+  const privateChat = { ...group, chatKey: 'private:202', triggerEntries: [{ mid: '10', senderId: '202' }] };
   assert.match(submit(tool, group, 'gif').content, /已排队/);
   assert.equal(submit(tool, group, 'png').isError, true);
   assert.match(submit(tool, privateChat, 'svg').content, /已排队/);
@@ -126,9 +209,16 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
   unblock();
   await first;
   await once(events, 'delivery', { signal: AbortSignal.timeout(5000) });
+  await new Promise(resolve => setImmediate(resolve));
   await sender.whenIdle();
   assert.deepEqual(funding, ['group:101', 'private:202']);
-  assert.deepEqual(delivered, [['group', '101', 'base64://' + gif.toString('base64')], ['upload_private_file', 202, 'base64://' + svg.toString('base64')]]);
+  assert.deepEqual(delivered, [
+    ['group', '101', [{ type: 'reply', data: { id: '9' } }, { type: 'image', data: { file: 'base64://' + gif.toString('base64') } }]],
+    ['upload_private_file', 202, 'base64://' + svg.toString('base64')],
+  ]);
+  assert.deepEqual(notices.slice(0, 2), [['group', '101', '开始画了。', '9'], ['private', '202', '开始画了。', '10']]);
+  assert.match(notices[2][2], /SVG 文件/);
+  assert.equal(notices[2][3], '10');
   assert.equal(settlements.length, 2);
   assert.equal(submit(tool, { ...group, proactive: true }, 'png').isError, true);
 });

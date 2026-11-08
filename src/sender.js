@@ -251,7 +251,8 @@ export class SendQueue {
         if (gap > 0) await sleep(gap);
         this.#guard(chatKey, selection, options.guard);
         // 发送去重：窗口期内 identical 文本跳过（防模型重复调用/超时重试造成的重复发言）
-        const dedupeText = i === 0 && options.atUserId ? `__at__${options.atUserId}:${text}` : text;
+        const dedupeText = options.dedupeKey ? `__text__${options.dedupeKey}:${i}`
+          : i === 0 && options.atUserId ? `__at__${options.atUserId}:${text}` : text;
         if (this.#isDuplicate(chatKey, dedupeText)) {
           console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
           return { text, messageId: null, at: formatClockTime(Date.now()), deduped: true };
