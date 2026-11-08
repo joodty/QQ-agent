@@ -34,6 +34,13 @@ test('provider sends native format options and rejects bytes with a different fo
   assert.throws(() => normalizeImageRequest({ prompt: 'a circle', format: 'gif', frames: 17 }));
   const mismatch = createOpenAiImageProvider({ apiKey: 'fake', fetchImpl: async () => Response.json({ data: [{ b64_json: png.toString('base64') }] }) });
   await assert.rejects(mismatch({ ...normalizeImageRequest({ prompt: 'a circle', format: 'gif' }), actor }), /格式不符/);
+  const refused = createOpenAiImageProvider({
+    apiKey: 'fake',
+    fetchImpl: async () => Response.json({ error: { code: 'insufficient_quota', message: 'private details' } }, { status: 429 })
+  });
+  await assert.rejects(refused({ ...normalizeImageRequest({ prompt: 'a circle' }), actor }), {
+    status: 429, providerCode: 'insufficient_quota', refusal: true, message: '图像服务拒绝了请求（HTTP 429）'
+  });
 });
 
 function submit(tool, ctx, format) {

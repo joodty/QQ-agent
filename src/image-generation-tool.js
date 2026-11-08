@@ -47,8 +47,14 @@ export function createImageGenerationTool({
     try {
       guard();
       if (!result) {
-        log('image job failed before delivery', id, request.format);
-        await ctx.sender.sendTextBatch(ctx.chatKey, [hold ? '这次绘图没完成，可以稍后再试。' : '当前会话的额度或授权无法开始绘图。'], { guard });
+        log('image job failed before delivery', id, request.format, failure?.status ?? '-', failure?.providerCode ?? '-');
+        let message = '这次绘图没完成，可以稍后再试。';
+        if (!hold) message = '当前会话的额度或授权无法开始绘图。';
+        else if (failure?.providerCode === 'insufficient_quota') message = '绘图账户的 API 额度不足。';
+        else if (failure?.status === 429) message = '绘图服务正在限流，过一会儿再试。';
+        else if (['content_policy_violation', 'moderation_blocked', 'safety_violations'].includes(failure?.providerCode)) message = '绘图服务拦截了这次描述，可以换个画面再试。';
+        else if (failure?.status) message = `绘图服务拒绝了这次请求（HTTP ${failure.status}）。`;
+        await ctx.sender.sendTextBatch(ctx.chatKey, [message], { guard });
       } else if (result.format === 'svg') {
         await ctx.sender.sendGeneratedFile(ctx.chatKey, result.bytes, '绘图-' + id.slice(0, 8) + '.svg', { guard });
       } else {

@@ -52,7 +52,11 @@ export function createOpenAiImageProvider({ apiKey, fetchImpl = fetch, sanitize 
     const result = await response.json();
     if (!response.ok) {
       const refusal = [400, 401, 403, 429].includes(response.status) && !!result?.error && !result.usage;
-      throw Object.assign(Error(`图像服务拒绝了请求（HTTP ${response.status}）`), { refusal, usage: result?.usage });
+      const providerCode = result?.error?.code;
+      throw Object.assign(Error(`图像服务拒绝了请求（HTTP ${response.status}）`), {
+        refusal, usage: result?.usage, status: response.status,
+        providerCode: typeof providerCode === 'string' && /^[a-z0-9_]{1,64}$/.test(providerCode) ? providerCode : null,
+      });
     }
     try {
       const encoded = result?.data?.[0]?.b64_json;
