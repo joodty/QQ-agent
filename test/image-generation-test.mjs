@@ -64,7 +64,6 @@ test('a quoted reference can become a GIF with user-selected playback options', 
         events.emit('delivery', { chatKey, segments });
         return { message_id: 7 };
       },
-      async sendTextBatch(_chatKey, messages, options) { events.emit('progress', { messages, reply: options.replyToMessageId }); }
     }
   };
   const generate = createOpenAiImageProvider({ apiKey: 'fake', async fetchImpl(endpoint, { body }) {
@@ -86,9 +85,7 @@ test('a quoted reference can become a GIF with user-selected playback options', 
   });
   assert.equal(submit(tool, ctx, 'svg', { reference: true }).isError, true);
   const delivery = once(events, 'delivery', { signal: AbortSignal.timeout(3000) });
-  const progress = once(events, 'progress', { signal: AbortSignal.timeout(3000) });
   assert.match(submit(tool, ctx, 'gif', { reference: true, frames: 4, frameMs: 180 }).content, /已接单/);
-  assert.deepEqual(await progress, [{ messages: ['开始画了。'], reply: '1' }]);
   assert.deepEqual(await delivery, [{
     chatKey: 'group:101', segments: [
       { type: 'reply', data: { id: '1' } },
@@ -125,10 +122,9 @@ test('uses the requested message and avoids repeat progress before delivering PN
     captureAuthority: () => ({}), assertAuthority() {},
     paidGuard: () => ({ prepareImage: args => args, dispatch() {}, completeImage() {} }),
     timing: {
-      estimate(category) { assert.equal(category, 'png'); return { seconds: '5～10', reminderMs: 10_000 }; },
       record(category, duration) { samples.push({ category, duration }); },
     },
-    async generate() { await gate; return { format: 'png', bytes: png }; },
+    async generate() { events.emit('started'); await gate; return { format: 'png', bytes: png }; },
   });
   const ctx = {
     chatKey: 'private:7', assertCurrent() {},
@@ -150,17 +146,17 @@ test('uses the requested message and avoids repeat progress before delivering PN
   };
   assert.equal(submit(tool, ctx, 'png').isError, true);
   assert.equal(submit(tool, ctx, 'png', { requestMessageId: '999' }).isError, true);
-  const started = once(events, 'progress');
+  const started = once(events, 'started', { signal: AbortSignal.timeout(3000) });
   const accepted = submit(tool, ctx, 'png', { requestMessageId: '-3' });
   assert.match(accepted.content, /已接单/);
   assert.equal(accepted.backgroundJob.tool, 'generate_image');
   assert.ok(accepted.backgroundJob.id);
   await started;
   t.mock.timers.tick(9999);
-  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
+  assert.deepEqual(progress, []);
   t.mock.timers.tick(1);
   t.mock.timers.tick(60_000);
-  assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
+  assert.deepEqual(progress, []);
   const delivered = once(events, 'delivery');
   finish();
   await delivered;
@@ -178,9 +174,9 @@ test('only waiting jobs receive a position, counting active and queued work ahea
   const tool = createImageGenerationTool({
     captureAuthority: () => ({}), assertAuthority() {},
     paidGuard: () => ({ prepareImage: args => args, dispatch() {}, completeImage() {} }),
-    timing: { estimate: () => ({ seconds: '10～20', reminderMs: 20_000 }), record() {} },
+    timing: { record() {} },
     async generate({ actor: requester }) {
-      if (requester === '1') await gate;
+      if (requester === '1') { events.emit('started'); await gate; }
       return { format: 'png', bytes: png };
     },
   });
@@ -195,18 +191,17 @@ test('only waiting jobs receive a position, counting active and queued work ahea
   const chats = ['1', '2', '3'].map(id => ({
     chatKey: `private:${id}`, triggerEntries: [{ mid: id, senderId: id }], sender, assertCurrent() {},
   }));
-  const started = once(events, 'private:1', { signal: AbortSignal.timeout(3000) });
+  const started = once(events, 'started', { signal: AbortSignal.timeout(3000) });
   for (const chat of chats) assert.match(submit(tool, chat, 'png').content, /已接单/);
   await started;
   assert.deepEqual(notices, [
     ['private:2', '接到了，前面还有 1 张，轮到就开画。', '2'],
     ['private:3', '接到了，前面还有 2 张，轮到就开画。', '3'],
-    ['private:1', '开始画了，预计 10～20 秒。', '1'],
   ]);
   const lastDelivered = once(events, 'delivered:private:3', { signal: AbortSignal.timeout(3000) });
   finishFirst();
   await lastDelivered;
-  assert.deepEqual(notices.slice(3), []);
+  assert.equal(notices.length, 2);
 });
 
 test('acknowledges immediately, deduplicates, and delivers through the original chat with isolated funding context', async () => {
@@ -262,7 +257,7 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
     ['group', '101', [{ type: 'reply', data: { id: '9' } }, { type: 'image', data: { file: 'base64://' + gif.toString('base64') } }]],
     ['upload_private_file', 202, 'base64://' + svg.toString('base64')],
   ]);
-  assert.deepEqual(notices.filter(([kind]) => kind === 'group'), [['group', '101', '开始画了。', '9']]);
+  assert.deepEqual(notices.filter(([kind]) => kind === 'group'), []);
   const privateNotices = notices.filter(([kind]) => kind === 'private');
   assert.deepEqual(privateNotices, [
     ['private', '202', '接到了，前面还有 1 张，轮到就开画。', '10'],

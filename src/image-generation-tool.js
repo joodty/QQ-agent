@@ -52,14 +52,7 @@ export function createImageGenerationTool({
         ledger.release(hold);
         throw error;
       }
-      const estimate = timing.estimate(category);
       startedAt = performance.now();
-      if (!job.ahead) {
-        void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start', () => {
-          guard();
-          if (generatedAt !== undefined) throw Error('绘图已结束');
-        });
-      }
       try {
         result = await generate({ ...request, actor, signal: ctx.abortSignal, referenceImage });
       } catch (error) {
@@ -179,7 +172,7 @@ export function createImageGenerationTool({
       const actor = String(requestEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
       const id = randomUUID();
       const ahead = busy.size;
-      const job = { ctx, id, request, actor, guard, referenceEntry, replyToMessageId, ahead, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() };
+      const job = { ctx, id, request, actor, guard, referenceEntry, replyToMessageId, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() };
       usedContexts.add(context);
       busy.add(ctx.chatKey);
       waiting.push(job);
