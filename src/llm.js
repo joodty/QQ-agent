@@ -513,6 +513,10 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     }
     const detail = api.apiKey ? res.text.split(api.apiKey).join('[redacted]') : res.text;
     const failure = new Error(`模型 API HTTP ${res.status}：${detail.slice(0, 500)}`);
+    failure.httpStatus = res.status;
+    if (res.status === 429) {
+      try { failure.providerCode = JSON.parse(res.text)?.error?.code; } catch { /* 网关可能返回纯文本 */ }
+    }
     // Native subscription endpoints must not turn a denied model, exhausted
     // quota, or unknown protocol result into a switch to another paid account.
     if (res.commandCode) failure.code = `COMMANDCODE_HTTP_${res.status}`;

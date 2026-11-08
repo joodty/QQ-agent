@@ -185,6 +185,7 @@ export function createImageGenerationTool({
       usedContexts.add(context);
       busy.add(ctx.chatKey);
       waiting.push(job);
+      if (ctx.session) ctx.session.backgroundReply = true;
       if (ahead > 0) {
         void notify(job, `接到了，前面还有 ${ahead} 张，轮到就开画。`, 'queued', () => {
           guard();

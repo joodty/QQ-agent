@@ -5,6 +5,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter, once } from 'node:events';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-commandcode-orchestrator-'));
 process.env.QQ_AGENT_DATA_DIR = dir;
@@ -25,7 +26,7 @@ test('real orchestrator completes two Command Code tool rounds, preserves reason
   setRuntimeConfig({ ...structuredClone(DEFAULT_CONFIG),
     api: { ...structuredClone(DEFAULT_CONFIG.api), baseUrl: endpoint, model, apiKey: 'fixture-commandcode-key',
       vision: false, maxRounds: 2, timeoutMs: 2000, fallbackModels: [] },
-    allow: { groups: [], private: ['123'] }, deny: { groups: [], private: [] }, allowAllWhenEmpty: false,
+    allow: { groups: ['456'], private: ['123'] }, deny: { groups: [], private: [] }, allowAllWhenEmpty: false,
     persona: { ...structuredClone(DEFAULT_CONFIG.persona), botName: 'FixtureBot', roleText: 'Synthetic integration-test assistant.' },
     send: { minGapMs: 1, maxGapMs: 1, byLengthMs: 0, maxPerMinute: 1000, maxPerHour: 10000, dedupeWindowMs: 0 },
     store: { ...structuredClone(DEFAULT_CONFIG.store), contextTier: 4, historyCount: 10 },
@@ -34,12 +35,20 @@ test('real orchestrator completes two Command Code tool rounds, preserves reason
     productionBudget: { enabled: true, endpoint, model,
       prices: { inputCnyPerMillion: 2.4, cacheHitCnyPerMillion: .048, outputCnyPerMillion: 9.6, reasoningIncluded: true },
       defaultDailyLimitCny: 10, totalDailyLimitCny: 10, outputCap: 128, overrides: {}, initialSpent: {},
-      funding: { [key]: { mode: 'platform', enabled: true } } }
+      funding: { [key]: { mode: 'platform', enabled: true }, 'group:456': { mode: 'platform', enabled: true } } }
   });
   const store = new ChatStore(), memory = new MemoryStore(), sessions = new SessionRegistry();
   const sent = [], events = [], wire = [];
+  const outgoing = new EventEmitter();
   const onebot = { selfId: '888', selfNickname: 'FixtureBot', connected: true,
-    async sendText(kind, id, text) { sent.push({ kind, id, text }); return { message_id: 7000 + sent.length }; } };
+    async call() { return {}; },
+    async sendText(kind, id, text, { replyToMessageId } = {}) {
+      const message = { kind, id, text };
+      if (replyToMessageId) message.replyToMessageId = replyToMessageId;
+      sent.push(message);
+      outgoing.emit('message', message);
+      return { message_id: 7000 + sent.length };
+    } };
   const sender = new SendQueue({ store, onebot });
   const orchestrator = new Orchestrator({ store, memory, sessions, sender, onebot, stickers: {},
     emit: (type, payload) => events.push({ type, payload }) });
@@ -114,4 +123,52 @@ test('real orchestrator completes two Command Code tool rounds, preserves reason
   assert.ok(guard.status(key).spentCny > 0);
   assert.equal(guard.status(key).spentCny, records.reduce((sum, row) => sum + row.actualCny, 0));
   assert.equal(guard.totalStatus().spentCny, guard.status(key).spentCny);
+
+  const append = (chatKey, mid, atMe = null) => store.appendIncoming(chatKey, {
+    mid, ts: Date.now(), senderId: '123', senderName: 'Fixture caller', text: 'Fixture follow-up', atMe,
+  });
+  const rateLimited = () => Response.json({ error: { code: 'rate_limit_exceeded' } }, { status: 429 });
+
+  await t.test('a slow explicit mention gets one quoted update and then a quoted rate limit failure', async () => {
+    const setTimer = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...args) => setTimer(fn, ms === 15_000 ? 15 : ms, ...args);
+    let finishRequest;
+    let attempts = 0;
+    const pending = new Promise(resolve => { finishRequest = resolve; });
+    globalThis.fetch = async () => { attempts++; await pending; return rateLimited(); };
+    const group = 'group:456';
+    append(group, '6002', true);
+    const notice = once(outgoing, 'message', { signal: AbortSignal.timeout(3000) });
+    const turn = orchestrator.wake(group);
+    try {
+      assert.deepEqual(await notice, [{
+        kind: 'group', id: '456', text: '我还在处理这条，稍等一下。', replyToMessageId: '6002',
+      }]);
+    } finally {
+      globalThis.setTimeout = setTimer;
+      finishRequest();
+      await turn;
+    }
+    assert.equal(attempts, 1);
+    assert.deepEqual(sent.slice(1).map(message => [message.text, message.replyToMessageId]), [
+      ['我还在处理这条，稍等一下。', '6002'], ['聊天服务正在限流，过一会儿再问我吧。', '6002'],
+    ]);
+  });
+
+  await t.test('ordinary group chatter stays quiet on failure and private budget denial explains itself', async () => {
+    globalThis.fetch = async () => rateLimited();
+    const sentBefore = sent.length;
+    append('group:456', '6003', false);
+    await orchestrator.wake('group:456');
+    assert.equal(sent.length, sentBefore);
+
+    const cfg = getConfig();
+    setRuntimeConfig({ ...cfg, productionBudget: { ...cfg.productionBudget, overrides: { [key]: 0 } } });
+    globalThis.fetch = async () => assert.fail('Budget denial must happen before contacting the provider');
+    append(key, '6004');
+    await orchestrator.wake(key);
+    assert.deepEqual(sent.slice(sentBefore), [{
+      kind: 'private', id: '123', text: '这次回复被额度限制拦住了。', replyToMessageId: '6004',
+    }]);
+  });
 });

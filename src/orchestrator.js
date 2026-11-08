@@ -11,7 +11,7 @@
 import { getConfig, storeConfigForChat, personaForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { randInt } from './util.js';
-import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, isAtMe, resolveContextTier } from './prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
@@ -22,6 +22,16 @@ import { rescueUnsentReply } from './reply-rescue.js';
 import { archiveHistorySection } from './archive-runtime.js';
 import { runWithPaidConversation } from './paid-call-guard.js';
 import { speechWasRequested, createSpeechReplySender } from './speech-runtime.js';
+
+const replyFeedbackDelayMs = 15_000;
+
+function replyFailureMessage(error) {
+  if (error.replyFeedback === 'budget-cooldown') return '这会儿有额度限制，请等一分钟再问我。';
+  if (error.replyFeedback === 'budget') return '这次回复被额度限制拦住了。';
+  if (error.httpStatus === 402 || error.providerCode === 'insufficient_quota') return '聊天服务的额度不足，这次没能回复。';
+  if (error.httpStatus === 429) return '聊天服务正在限流，过一会儿再问我吧。';
+  return '这次没能回复，过一会儿再问我吧。';
+}
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null, speech = null, speechRandom = Math.random }) {
@@ -620,8 +630,39 @@ export class Orchestrator {
     }
     this.activeRuns.set(chatKey, session.id);
     session.archiveSelection = this.store.captureArchive?.(chatKey) ?? null;
+    session.backgroundReply = false;
     this.sessions.update(session.id);
     this.emit('chat-update', chatKey);
+
+    const mention = {
+      selfId: cfgNow.onebot?.selfId || this.onebot.selfId,
+      selfNickname: cfgNow.persona?.selfNickname || this.onebot.selfNickname,
+      botName: cfgNow.persona?.botName,
+    };
+    const addressed = !proactive && [...triggerEntries].reverse().find(entry =>
+      /^-?[1-9]\d*$/.test(String(entry.mid))
+      && (kind === 'private' || (entry.atMe ?? isAtMe(entry.text, mention)))
+    );
+    const canNotify = () => !this.paused && !this.aborted && !this.sessionAbortMarks.has(session.id)
+      && this.activeRuns.get(chatKey) === session.id && session.status === 'running'
+      && !session.sent.length && !session.backgroundReply;
+    const notify = async (text, stage, isCurrent = canNotify) => {
+      if (!isCurrent()) return;
+      try {
+        await this.sender.sendTextBatch(chatKey, [text], {
+          replyToMessageId: String(addressed.mid), dedupeKey: `reply:${session.id}:${stage}`,
+          guard: () => {
+            if (!isCurrent()) throw Error('回复状态已变化');
+            this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
+          },
+        });
+      } catch { /* 进度通知失败不影响正常回复 */ }
+    };
+    let waitingForReply = true;
+    const feedbackTimer = addressed && setTimeout(() => {
+      void notify('我还在处理这条，稍等一下。', 'slow', () => waitingForReply && canNotify());
+    }, replyFeedbackDelayMs);
+    feedbackTimer?.unref?.();
 
     // ── 会话级重试 ──
     // 单次 API 请求内部已经会重试（见 chatCompletionWithRetry），
@@ -662,6 +703,7 @@ export class Orchestrator {
         }
       }
 
+      waitingForReply = false;
       if (lastError) {
         // 用户手动中止（「中止」按钮）打断在途请求时，错误从 #runAgent 一路上抛
         // 到这里 —— 不能记成 error：那会让 UI 亮出"重试"按钮（中止不该重试），
@@ -674,6 +716,7 @@ export class Orchestrator {
           this.emit('session-end', { sessionId: session.id, chatKey, status: 'aborted', sent: session.sent.length, usage: session.usage });
           console.log(`[orchestrator] 会话 ${session.id} 被用户中止（错误上抛路径收尾）`);
         } else {
+          if (addressed) await notify(replyFailureMessage(lastError), 'failed');
           session.error = String(lastError?.message ?? lastError);
           this.sessions.finish(session.id, 'error');
           this.emit('session-end', { sessionId: session.id, chatKey, status: 'error', error: session.error });
@@ -681,6 +724,8 @@ export class Orchestrator {
         }
       }
     } finally {
+      waitingForReply = false;
+      if (feedbackTimer) clearTimeout(feedbackTimer);
       this.sessionAbortControllers.delete(session.id);
       if (this.activeRuns.get(chatKey) === session.id) {
         this.activeRuns.delete(chatKey);

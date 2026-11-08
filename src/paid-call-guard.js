@@ -15,6 +15,7 @@ const chatKey = x => typeof x === 'string' && /^(group|private):[1-9]\d*$/.test(
 const money = x => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 1_000_000;
 const integer = x => Number.isSafeInteger(x) && x >= 0;
 const error = (message, code = 'PAID_CALL_DENIED') => Object.assign(Error(message), { code, statusCode: 403 });
+const budgetError = (message, replyFeedback = 'budget') => Object.assign(error(message), { replyFeedback });
 const isDate = x => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x + 'T00:00:00Z')) && new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) === x;
 const stable = x => Array.isArray(x) ? '[' + x.map(stable).join(',') + ']' : plain(x) ? '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + stable(x[k])).join(',') + '}' : JSON.stringify(x);
 const hash = x => crypto.createHash('sha256').update(stable(x)).digest('hex');
@@ -298,11 +299,11 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
         if (degraded && (purpose !== 'chat' || !direct)) throw error('预算达到80%，已暂停主动参与和后台记忆整理');
         const quote = degraded ? constrainedBody(body, p, true) : first;
         const hold = budget.reserve(context.conversationKey, { operationId, estimatedMaxCost: quote.amount, quote: { currency: 'CNY', complete: true } });
-        if (!hold.allowed) throw error(hold.reason || '今日会话预算不足');
+        if (!hold.allowed) throw hold.reused ? error(hold.reason) : budgetError(hold.reason || '今日会话预算不足');
         const trialHold=globalTrial?.reserve('private:1',{operationId:'trial:'+operationId,estimatedMaxCost:quote.amount,quote:{currency:'CNY',complete:true}});
-        if(trialHold&&!trialHold.allowed)throw error('平台今日体验总额不足');
+        if(trialHold&&!trialHold.allowed)throw budgetError('平台今日体验总额不足');
         const totalHold=globalTotal?.reserve('private:1',{operationId:'total:'+operationId,estimatedMaxCost:quote.amount,quote:{currency:'CNY',complete:true}});
-        if(totalHold&&!totalHold.allowed)throw error('机器人今日总额度不足');
+        if(totalHold&&!totalHold.allowed)throw budgetError('机器人今日总额度不足');
         const raw = storage.readText('call-attribution'), attribution = raw === null ? {} : JSON.parse(raw);
         attribution[hold.id] = { key:context.conversationKey,mode:p.source.mode,ownerId:p.source.ownerId || null,credentialRef:p.source.credentialRef || null,model:p.model };
         storage.writeText('call-attribution',JSON.stringify(attribution),raw);
@@ -353,14 +354,14 @@ export function createPaidCallGuard({ storage, config, now = Date.now } = {}) {
           || token.sourceId !== p.source.id || token.sourceVersion !== p.source.version || token.configFingerprint !== fundingFingerprint(p, token.key)) throw error('付费来源或请求配置已变化');
         if(token.free){if(!verifiedFreeQuote(p))throw error('免费模型报价已变化');freeCalls.dispatch(token.id);return;}
         const current = budget.status(token.key),checks=[current,...[p.source.mode==='trial'?trial(p):null,total(p)].filter(Boolean).map(l=>l.status('private:1'))];
-        if (checks.some(s=>s.action!=='normal') && !token.degraded) throw error('费用已达到节流阈值，请按新限制重新发起请求');
+        if (checks.some(s=>s.action!=='normal') && !token.degraded) throw budgetError('费用已达到节流阈值，请按新限制重新发起请求');
         const raw = storage.readText('interactive-cooldown'), prior = raw === null ? {} : JSON.parse(raw);
         if (!plain(prior) || Object.values(prior).some(x => !plain(x) || typeof x.requestId !== 'string' || !integer(x.at))) throw error('费用节流记录损坏', 'PAID_LEDGER_UNAVAILABLE');
-        if (token.degraded && prior[token.key]?.requestId !== token.requestId && now() - (prior[token.key]?.at ?? -Infinity) < 60_000) throw error('预算节流中，请间隔至少60秒再发起回复');
+        if (token.degraded && prior[token.key]?.requestId !== token.requestId && now() - (prior[token.key]?.at ?? -Infinity) < 60_000) throw budgetError('预算节流中，请间隔至少60秒再发起回复', 'budget-cooldown');
         if (checks.some(s=>s.action!=='normal') && token.purpose !== 'chat') throw error('预算已达到80%，后台调用暂停');
-        if (!budget.dispatch(token.id).mayDispatch) throw error('剩余额度或配置已变化，未发送调用暂停');
-        if(token.trialHoldId&&!trial(p).dispatch(token.trialHoldId).mayDispatch)throw error('平台体验总额已变化');
-        if(token.totalHoldId&&!total(p)?.dispatch(token.totalHoldId).mayDispatch)throw error('机器人今日总额度已变化');
+        if (!budget.dispatch(token.id).mayDispatch) throw budgetError('剩余额度或配置已变化，未发送调用暂停');
+        if(token.trialHoldId&&!trial(p).dispatch(token.trialHoldId).mayDispatch)throw budgetError('平台体验总额已变化');
+        if(token.totalHoldId&&!total(p)?.dispatch(token.totalHoldId).mayDispatch)throw budgetError('机器人今日总额度已变化');
         if (token.purpose === 'chat' && prior[token.key]?.requestId !== token.requestId) {
           Object.defineProperty(prior, token.key, { value: { requestId: token.requestId, at: now() }, enumerable: true, configurable: true, writable: true });
           storage.writeText('interactive-cooldown', JSON.stringify(prior), raw);
