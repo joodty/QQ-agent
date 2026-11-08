@@ -22,18 +22,19 @@ export function createImageGenerationTool({
   const usedContexts = new WeakSet();
   let running = false;
 
+  async function notify(job, text, stage, check = job.guard) {
+    const { ctx, id, replyToMessageId } = job;
+    try {
+      await ctx.sender.sendTextBatch(ctx.chatKey, [text], {
+        guard: check, replyToMessageId, dedupeKey: `image:${id}:${stage}`,
+      });
+    } catch { log('image status delivery skipped', id, stage); }
+  }
+
   async function generateAndDeliver(job) {
     const { ctx, request, id, guard, actor, referenceEntry, replyToMessageId, queuedAt } = job;
     const dequeuedAt = performance.now();
     const category = request.format === 'png' && referenceEntry ? 'reference' : request.format;
-    const replyOptions = { guard, replyToMessageId };
-    async function notify(text, stage, check = guard) {
-      try {
-        await ctx.sender.sendTextBatch(ctx.chatKey, [text], {
-          ...replyOptions, guard: check, dedupeKey: `image:${id}:${stage}`,
-        });
-      } catch { log('image status delivery skipped', id, stage); }
-    }
     let startedAt, generatedAt;
     let hold, ledger, result, failure, referenceImage, referenceFailed = false;
     try {
@@ -53,10 +54,10 @@ export function createImageGenerationTool({
       }
       const estimate = timing.estimate(category);
       startedAt = performance.now();
-      void notify(estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
+      void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
       let finished = false;
       const reminder = setTimeout(() => {
-        void notify('这张画得比平时久一些，还在等结果。', 'slow', () => {
+        void notify(job, '这张画得比平时久一些，还在等结果。', 'slow', () => {
           guard();
           if (finished) throw Error('绘图已结束');
         });
@@ -90,11 +91,11 @@ export function createImageGenerationTool({
         else if (failure?.status === 429) message = '绘图服务正在限流，过一会儿再试。';
         else if (['content_policy_violation', 'moderation_blocked', 'safety_violations'].includes(failure?.providerCode)) message = '绘图服务拦截了这次描述，可以换个画面再试。';
         else if (failure?.status) message = `绘图服务拒绝了这次请求（HTTP ${failure.status}）。`;
-        await notify(message, 'failed');
+        await notify(job, message, 'failed');
       } else if (result.format === 'svg') {
         const name = '绘图-' + id.slice(0, 8) + '.svg';
         await ctx.sender.sendGeneratedFile(ctx.chatKey, result.bytes, name, { guard });
-        await notify(`画好了，SVG 文件「${name}」已发到这里。`, 'svg');
+        await notify(job, `画好了，SVG 文件「${name}」已发到这里。`, 'svg');
       } else {
         const segments = [{ type: 'image', data: { file: 'base64://' + result.bytes.toString('base64') } }];
         if (replyToMessageId) segments.unshift({ type: 'reply', data: { id: replyToMessageId } });
@@ -109,7 +110,7 @@ export function createImageGenerationTool({
       });
     } catch {
       log('image job delivery unconfirmed', id, request.format);
-      if (result) await notify('图已生成，QQ 回传没有确认成功。', 'delivery-failed');
+      if (result) await notify(job, '图已生成，QQ 回传没有确认成功。', 'delivery-failed');
     }
   }
 
@@ -129,7 +130,7 @@ export function createImageGenerationTool({
 
   return {
     id: 'generate_image', name: '绘图', category: 'messaging', icon: '🎨',
-    description: '用户明确要求画图时调用。改原图、按参考图画新图或让静态图动起来时，传 reference=true，使用请求消息的附图或明确引用的图。静态改图用 format=png，让原图动起来用 format=gif，并在描述里写清动作。纯文字生成支持 PNG、GIF、SVG。后台会自动发开工通知和成图，无需另发确认。',
+    description: '用户明确要求画图时调用。改原图、按参考图画新图或让静态图动起来时，传 reference=true，使用请求消息的附图或明确引用的图。静态改图用 format=png，让原图动起来用 format=gif，并在描述里写清动作。纯文字生成支持 PNG、GIF、SVG。后台会自动发排队通知（如需等待）、开工通知和成图，无需另发确认。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['prompt'],
       properties: {
@@ -179,11 +180,19 @@ export function createImageGenerationTool({
       };
       const actor = String(requestEntry?.senderId ?? ctx.triggerEntries.find(entry => entry.senderId)?.senderId ?? ctx.chatKey);
       const id = randomUUID();
+      const ahead = busy.size;
+      const job = { ctx, id, request, actor, guard, referenceEntry, replyToMessageId, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() };
       usedContexts.add(context);
       busy.add(ctx.chatKey);
-      waiting.push({ ctx, id, request, actor, guard, referenceEntry, replyToMessageId, queuedAt: performance.now(), run: AsyncLocalStorage.snapshot() });
+      waiting.push(job);
+      if (ahead > 0) {
+        void notify(job, `接到了，前面还有 ${ahead} 张，轮到就开画。`, 'queued', () => {
+          guard();
+          if (!waiting.includes(job)) throw Error('绘图已开始处理');
+        });
+      }
       setImmediate(() => drain().catch(() => log('image queue interrupted')));
-      return { content: '绘图已排队，完成后会发回这里。' };
+      return { content: '后台已接单，通知和成图会自动发回，无需另发确认。' };
     }
   };
 }

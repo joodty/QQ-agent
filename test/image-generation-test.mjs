@@ -84,7 +84,7 @@ test('a quoted reference can become a GIF with user-selected playback options', 
   assert.equal(submit(tool, ctx, 'svg', { reference: true }).isError, true);
   const delivery = once(events, 'delivery', { signal: AbortSignal.timeout(3000) });
   const progress = once(events, 'progress', { signal: AbortSignal.timeout(3000) });
-  assert.match(submit(tool, ctx, 'gif', { reference: true, frames: 4, frameMs: 180 }).content, /已排队/);
+  assert.match(submit(tool, ctx, 'gif', { reference: true, frames: 4, frameMs: 180 }).content, /已接单/);
   assert.deepEqual(await progress, [{ messages: ['开始画了。'], reply: '1' }]);
   assert.deepEqual(await delivery, [{
     chatKey: 'group:101', segments: [
@@ -147,7 +147,7 @@ test('uses the requested message and sends only one overdue update before delive
   assert.equal(submit(tool, ctx, 'png').isError, true);
   assert.equal(submit(tool, ctx, 'png', { requestMessageId: '999' }).isError, true);
   const started = once(events, 'progress');
-  assert.match(submit(tool, ctx, 'png', { requestMessageId: '-3' }).content, /已排队/);
+  assert.match(submit(tool, ctx, 'png', { requestMessageId: '-3' }).content, /已接单/);
   await started;
   t.mock.timers.tick(9999);
   assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
@@ -161,6 +161,48 @@ test('uses the requested message and sends only one overdue update before delive
   assert.equal(samples.length, 1);
   assert.equal(samples[0].category, 'png');
   assert.ok(Object.values(samples[0].duration).every(ms => ms >= 0));
+});
+
+test('only waiting jobs receive a position, counting active and queued work ahead', async () => {
+  const events = new EventEmitter();
+  const notices = [];
+  let finishFirst;
+  const gate = new Promise(resolve => { finishFirst = resolve; });
+  const tool = createImageGenerationTool({
+    captureAuthority: () => ({}), assertAuthority() {},
+    paidGuard: () => ({ prepareImage: args => args, dispatch() {}, completeImage() {} }),
+    timing: { estimate: () => ({ seconds: '10～20', reminderMs: 20_000 }), record() {} },
+    async generate({ actor: requester }) {
+      if (requester === '1') await gate;
+      return { format: 'png', bytes: png };
+    },
+  });
+  const sender = {
+    async sendTextBatch(key, [text], options) {
+      options.guard();
+      notices.push([key, text, options.replyToMessageId]);
+      events.emit(key);
+    },
+    async sendMedia() {},
+  };
+  const chats = ['1', '2', '3'].map(id => ({
+    chatKey: `private:${id}`, triggerEntries: [{ mid: id, senderId: id }], sender, assertCurrent() {},
+  }));
+  const started = once(events, 'private:1', { signal: AbortSignal.timeout(3000) });
+  for (const chat of chats) assert.match(submit(tool, chat, 'png').content, /已接单/);
+  await started;
+  assert.deepEqual(notices, [
+    ['private:2', '接到了，前面还有 1 张，轮到就开画。', '2'],
+    ['private:3', '接到了，前面还有 2 张，轮到就开画。', '3'],
+    ['private:1', '开始画了，预计 10～20 秒。', '1'],
+  ]);
+  const lastStarted = once(events, 'private:3', { signal: AbortSignal.timeout(3000) });
+  finishFirst();
+  await lastStarted;
+  assert.deepEqual(notices.slice(3), [
+    ['private:2', '开始画了，预计 10～20 秒。', '2'],
+    ['private:3', '开始画了，预计 10～20 秒。', '3'],
+  ]);
 });
 
 test('acknowledges immediately, deduplicates, and delivers through the original chat with isolated funding context', async () => {
@@ -201,9 +243,9 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
   });
   const group = { chatKey: 'group:101', triggerEntries: [{ mid: '9', senderId: '7' }], sender, assertCurrent() {} };
   const privateChat = { ...group, chatKey: 'private:202', triggerEntries: [{ mid: '10', senderId: '202' }] };
-  assert.match(submit(tool, group, 'gif').content, /已排队/);
+  assert.match(submit(tool, group, 'gif').content, /已接单/);
   assert.equal(submit(tool, group, 'png').isError, true);
-  assert.match(submit(tool, privateChat, 'svg').content, /已排队/);
+  assert.match(submit(tool, privateChat, 'svg').content, /已接单/);
   assert.equal(delivered.length, 0);
   const first = once(events, 'delivery', { signal: AbortSignal.timeout(5000) });
   unblock();
@@ -216,9 +258,14 @@ test('acknowledges immediately, deduplicates, and delivers through the original 
     ['group', '101', [{ type: 'reply', data: { id: '9' } }, { type: 'image', data: { file: 'base64://' + gif.toString('base64') } }]],
     ['upload_private_file', 202, 'base64://' + svg.toString('base64')],
   ]);
-  assert.deepEqual(notices.slice(0, 2), [['group', '101', '开始画了。', '9'], ['private', '202', '开始画了。', '10']]);
-  assert.match(notices[2][2], /SVG 文件/);
-  assert.equal(notices[2][3], '10');
+  assert.deepEqual(notices.filter(([kind]) => kind === 'group'), [['group', '101', '开始画了。', '9']]);
+  const privateNotices = notices.filter(([kind]) => kind === 'private');
+  assert.deepEqual(privateNotices.slice(0, 2), [
+    ['private', '202', '接到了，前面还有 1 张，轮到就开画。', '10'],
+    ['private', '202', '开始画了。', '10'],
+  ]);
+  assert.match(privateNotices[2][2], /SVG 文件/);
+  assert.equal(privateNotices[2][3], '10');
   assert.equal(settlements.length, 2);
   assert.equal(submit(tool, { ...group, proactive: true }, 'png').isError, true);
 });
@@ -230,7 +277,7 @@ test('revoked access suppresses both the provider request and QQ delivery', asyn
     paidGuard() { calls++; },
   });
   const ctx = { chatKey: 'group:101', triggerEntries: [{}], assertCurrent() {}, sender: { sendTextBatch() { calls++; } } };
-  assert.match(submit(tool, ctx, 'png').content, /已排队/);
+  assert.match(submit(tool, ctx, 'png').content, /已接单/);
   revoked = true;
   await delay(10);
   assert.equal(calls, 0);
