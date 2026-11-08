@@ -23,8 +23,6 @@ import { archiveHistorySection } from './archive-runtime.js';
 import { runWithPaidConversation } from './paid-call-guard.js';
 import { speechWasRequested, createSpeechReplySender } from './speech-runtime.js';
 
-const replyFeedbackDelayMs = 15_000;
-
 function replyFailureMessage(error) {
   if (error.replyFeedback === 'budget-cooldown') return '这会儿有额度限制，请等一分钟再问我。';
   if (error.replyFeedback === 'budget') return '这次回复被额度限制拦住了。';
@@ -630,7 +628,7 @@ export class Orchestrator {
     }
     this.activeRuns.set(chatKey, session.id);
     session.archiveSelection = this.store.captureArchive?.(chatKey) ?? null;
-    session.backgroundReply = false;
+    session.backgroundJob = null;
     this.sessions.update(session.id);
     this.emit('chat-update', chatKey);
 
@@ -645,7 +643,7 @@ export class Orchestrator {
     );
     const canNotify = () => !this.paused && !this.aborted && !this.sessionAbortMarks.has(session.id)
       && this.activeRuns.get(chatKey) === session.id && session.status === 'running'
-      && !session.sent.length && !session.backgroundReply;
+      && !session.sent.length && !session.backgroundJob;
     const notify = async (text, stage, isCurrent = canNotify) => {
       if (!isCurrent()) return;
       try {
@@ -658,13 +656,6 @@ export class Orchestrator {
         });
       } catch { /* 进度通知失败不影响正常回复 */ }
     };
-    let waitingForReply = true;
-    const drawingRequest = /画(?:一?[张幅个]|图|一下)|绘(?:画|图)|生图|(?:生成|做)(?:一?[张幅]|图)|\b(?:draw|generate an? image)\b/i.test(String(addressed?.text ?? ''));
-    const feedbackTimer = addressed && !drawingRequest && setTimeout(() => {
-      void notify('我还在处理这条，稍等一下。', 'slow', () => waitingForReply && canNotify());
-    }, replyFeedbackDelayMs);
-    feedbackTimer?.unref?.();
-
     // ── 会话级重试 ──
     // 单次 API 请求内部已经会重试（见 chatCompletionWithRetry），
     // 这里处理的是"整轮都救不回来"的情况：清干净上下文从头再来一次。
@@ -688,6 +679,7 @@ export class Orchestrator {
           const canRetry = attempt < MAX_SESSION_ATTEMPTS
             && isRetryableError(error)
             && sentCount === 0
+            && !session.backgroundJob
             && error?.code !== 'ARCHIVE_CHANGED'
             && !this.sessionAbortMarks.has(session.id)
             && !this.aborted;
@@ -704,7 +696,6 @@ export class Orchestrator {
         }
       }
 
-      waitingForReply = false;
       if (lastError) {
         // 用户手动中止（「中止」按钮）打断在途请求时，错误从 #runAgent 一路上抛
         // 到这里 —— 不能记成 error：那会让 UI 亮出"重试"按钮（中止不该重试），
@@ -725,8 +716,6 @@ export class Orchestrator {
         }
       }
     } finally {
-      waitingForReply = false;
-      if (feedbackTimer) clearTimeout(feedbackTimer);
       this.sessionAbortControllers.delete(session.id);
       if (this.activeRuns.get(chatKey) === session.id) {
         this.activeRuns.delete(chatKey);
@@ -1277,6 +1266,7 @@ export class Orchestrator {
         const result = blocked
           ? { content: `错误：${blocked.reason || '该工具调用被 Skill 拒绝'}`, isError: true }
           : await executeTool(toolDefs, ctx, name, argsRaw);
+        if (!result.isError && result.backgroundJob) session.backgroundJob = result.backgroundJob;
         this.store.assertArchiveCurrent?.(chatKey, session.archiveSelection);
         try {
           await skillManager.runHook('after-tool', {
@@ -1358,7 +1348,7 @@ export class Orchestrator {
       // 判定规则本身在插件里（canEndReplyBatch：失败发送 / 预告式结尾 / 该发图却没发
       // 等等都保留正常循环），这里只负责把现场信息递过去。
       // 插件没启用 / localPolicy 没开时该项为 false，行为与没有这套机制一致。
-      if (session.backgroundReply && toolResults.every(result => !result.isError && ['generate_image', 'finish'].includes(result.name))) {
+      if (session.backgroundJob && toolResults.every(result => !result.isError && ['generate_image', 'finish'].includes(result.name))) {
         finish = true;
       }
       if (!finish) {
@@ -1390,7 +1380,7 @@ export class Orchestrator {
     }
 
     // 收尾：发过话 = done；没发 = noreply（这是正常选项）
-    const status = session.error ? 'error' : (session.sent.length > 0 || session.backgroundReply ? 'done' : 'noreply');
+    const status = session.error ? 'error' : (session.sent.length > 0 || session.backgroundJob ? 'done' : 'noreply');
     this.sessionAbortControllers.delete(session.id);
     this.sessions.finish(session.id, status);
     this.emit('session-end', {

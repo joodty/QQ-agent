@@ -5,7 +5,6 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EventEmitter, once } from 'node:events';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-commandcode-orchestrator-'));
 process.env.QQ_AGENT_DATA_DIR = dir;
@@ -39,14 +38,12 @@ test('real orchestrator completes two Command Code tool rounds, preserves reason
   });
   const store = new ChatStore(), memory = new MemoryStore(), sessions = new SessionRegistry();
   const sent = [], events = [], wire = [];
-  const outgoing = new EventEmitter();
   const onebot = { selfId: '888', selfNickname: 'FixtureBot', connected: true,
     async call() { return {}; },
     async sendText(kind, id, text, { replyToMessageId } = {}) {
       const message = { kind, id, text };
       if (replyToMessageId) message.replyToMessageId = replyToMessageId;
       sent.push(message);
-      outgoing.emit('message', message);
       return { message_id: 7000 + sent.length };
     } };
   const sender = new SendQueue({ store, onebot });
@@ -129,29 +126,15 @@ test('real orchestrator completes two Command Code tool rounds, preserves reason
   });
   const rateLimited = () => Response.json({ error: { code: 'rate_limit_exceeded' } }, { status: 429 });
 
-  await t.test('a slow explicit mention gets one quoted update and then a quoted rate limit failure', async () => {
-    const setTimer = globalThis.setTimeout;
-    globalThis.setTimeout = (fn, ms, ...args) => setTimer(fn, ms === 15_000 ? 15 : ms, ...args);
-    let finishRequest;
+  await t.test('an explicit mention gets a quoted rate limit failure without a progress guess', async () => {
     let attempts = 0;
-    const pending = new Promise(resolve => { finishRequest = resolve; });
-    globalThis.fetch = async () => { attempts++; await pending; return rateLimited(); };
+    globalThis.fetch = async () => { attempts++; return rateLimited(); };
     const group = 'group:456';
     append(group, '6002', true);
-    const notice = once(outgoing, 'message', { signal: AbortSignal.timeout(3000) });
-    const turn = orchestrator.wake(group);
-    try {
-      assert.deepEqual(await notice, [{
-        kind: 'group', id: '456', text: '我还在处理这条，稍等一下。', replyToMessageId: '6002',
-      }]);
-    } finally {
-      globalThis.setTimeout = setTimer;
-      finishRequest();
-      await turn;
-    }
+    await orchestrator.wake(group);
     assert.equal(attempts, 1);
     assert.deepEqual(sent.slice(1).map(message => [message.text, message.replyToMessageId]), [
-      ['我还在处理这条，稍等一下。', '6002'], ['聊天服务正在限流，过一会儿再问我吧。', '6002'],
+      ['聊天服务正在限流，过一会儿再问我吧。', '6002'],
     ]);
   });
 

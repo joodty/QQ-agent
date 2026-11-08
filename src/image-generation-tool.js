@@ -55,7 +55,10 @@ export function createImageGenerationTool({
       const estimate = timing.estimate(category);
       startedAt = performance.now();
       if (!job.ahead) {
-        void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start');
+        void notify(job, estimate.seconds ? `开始画了，预计 ${estimate.seconds} 秒。` : '开始画了。', 'start', () => {
+          guard();
+          if (generatedAt !== undefined) throw Error('绘图已结束');
+        });
       }
       try {
         result = await generate({ ...request, actor, signal: ctx.abortSignal, referenceImage });
@@ -90,9 +93,10 @@ export function createImageGenerationTool({
       } else {
         const segments = [{ type: 'image', data: { file: 'base64://' + result.bytes.toString('base64') } }];
         if (replyToMessageId) segments.unshift({ type: 'reply', data: { id: replyToMessageId } });
-        await ctx.sender.sendMedia(ctx.chatKey, segments, {
+        const receipt = await ctx.sender.sendMedia(ctx.chatKey, segments, {
           guard, dedupeKey: id, label: result.format === 'gif' ? '[绘图 GIF]' : '[绘图 PNG]'
         });
+        if (receipt?.message_id == null) throw Error('missing OneBot image receipt');
       }
       if (result) timing.record(category, {
         queueMs: dequeuedAt - queuedAt,
@@ -179,7 +183,6 @@ export function createImageGenerationTool({
       usedContexts.add(context);
       busy.add(ctx.chatKey);
       waiting.push(job);
-      if (ctx.session) ctx.session.backgroundReply = true;
       if (ahead > 0) {
         void notify(job, `接到了，前面还有 ${ahead} 张，轮到就开画。`, 'queued', () => {
           guard();
@@ -187,7 +190,10 @@ export function createImageGenerationTool({
         });
       }
       setImmediate(() => drain().catch(() => log('image queue interrupted')));
-      return { content: '后台已接单，通知和成图会自动发回，无需另发确认。' };
+      return {
+        content: '后台已接单。绘图进度、成图和失败都由后台通知，请勿另发绘图状态。',
+        backgroundJob: { id, tool: 'generate_image' },
+      };
     }
   };
 }

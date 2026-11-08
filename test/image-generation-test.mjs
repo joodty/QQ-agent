@@ -60,7 +60,10 @@ test('a quoted reference can become a GIF with user-selected playback options', 
   const ctx = {
     chatKey: 'group:101', assertCurrent() {}, triggerEntries: [{ mid: '1', senderId: '7', reply: { mid: '-2' } }],
     sender: {
-      async sendMedia(chatKey, segments) { events.emit('delivery', { chatKey, segments }); },
+      async sendMedia(chatKey, segments) {
+        events.emit('delivery', { chatKey, segments });
+        return { message_id: 7 };
+      },
       async sendTextBatch(_chatKey, messages, options) { events.emit('progress', { messages, reply: options.replyToMessageId }); }
     }
   };
@@ -141,13 +144,17 @@ test('uses the requested message and avoids repeat progress before delivering PN
         assert.deepEqual(segments.map(segment => segment.type), ['reply', 'image']);
         assert.equal(segments[0].data.id, '-3');
         events.emit('delivery');
+        return { message_id: 8 };
       },
     },
   };
   assert.equal(submit(tool, ctx, 'png').isError, true);
   assert.equal(submit(tool, ctx, 'png', { requestMessageId: '999' }).isError, true);
   const started = once(events, 'progress');
-  assert.match(submit(tool, ctx, 'png', { requestMessageId: '-3' }).content, /已接单/);
+  const accepted = submit(tool, ctx, 'png', { requestMessageId: '-3' });
+  assert.match(accepted.content, /已接单/);
+  assert.equal(accepted.backgroundJob.tool, 'generate_image');
+  assert.ok(accepted.backgroundJob.id);
   await started;
   t.mock.timers.tick(9999);
   assert.deepEqual(progress, ['开始画了，预计 5～10 秒。']);
@@ -183,7 +190,7 @@ test('only waiting jobs receive a position, counting active and queued work ahea
       notices.push([key, text, options.replyToMessageId]);
       events.emit(key);
     },
-    async sendMedia(key) { events.emit('delivered:' + key); },
+    async sendMedia(key) { events.emit('delivered:' + key); return { message_id: 9 }; },
   };
   const chats = ['1', '2', '3'].map(id => ({
     chatKey: `private:${id}`, triggerEntries: [{ mid: id, senderId: id }], sender, assertCurrent() {},
