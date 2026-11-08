@@ -124,7 +124,7 @@ export function createImageGenerationTool({
 
   return {
     id: 'generate_image', name: '绘图', category: 'messaging', icon: '🎨',
-    description: '用户明确要求画图时调用。改原图、按参考图画新图或让静态图动起来时，传 reference=true，使用请求消息的附图或明确引用的图。静态改图用 format=png，让原图动起来用 format=gif，并在描述里写清动作。纯文字生成支持 PNG、GIF、SVG。后台会自动发排队通知（如需等待）、开工通知和成图，无需另发确认。',
+    description: '用户明确要求画图、重画或修改时，在本轮直接调用。只有工具返回已接单，绘图才会开始，后台会自动发进度和成图。只问图里哪里不对时，先看图并用 send_message 回答。改原图传 reference=true，原图须是请求的附图或引用图。如果没有原图，先请用户引用或重发。静态改图用 PNG，动图用 GIF，纯文字生成支持 PNG、GIF、SVG。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['prompt'],
       properties: {
